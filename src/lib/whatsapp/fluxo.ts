@@ -8,7 +8,8 @@
 //   01. Mensagem enviada por nos mesmos                 -> descarta
 //   02. Idempotencia (o Z-API reenvia eventos)          -> descarta duplicada
 //   03. Grupo conhecido? (auto-cadastra como inativo)   -> para se desconhecido
-//   04. Privado -> responde "fale no grupo" e para
+//   04. Privado: participa de grupo ativo?              -> para se nao
+//       Participando, responde "fale no grupo" e para
 //   05. Grava a mensagem
 //   06. Interruptor geral desligado                     -> para (so grava)
 //   07. Numero na lista de ignorados                    -> para (so grava)
@@ -31,6 +32,7 @@ import { normalizarTelefone, telefonesBatem, paraEnvio } from '@/lib/whatsapp/te
 import { dentroDoHorario, aplicarVariaveisHorario } from '@/lib/whatsapp/horario'
 import { classificar, diagnosticar, preFiltrarCasos, iaDisponivel } from '@/lib/whatsapp/ia'
 import { dispararAlerta } from '@/lib/whatsapp/alertas'
+import { participaDeGrupoAtivo, sincronizarParticipantes } from '@/lib/whatsapp/participantes'
 import type {
   Atendimento,
   CasoConhecimento,
@@ -136,6 +138,11 @@ export async function processarMensagem(payload: PayloadZAPI): Promise<Resultado
     if (!grupo || !grupo.ativo) {
       return { acao: 'grupo_inativo', detalhe: `${payload.chatName ?? chatId} nao esta ativo` }
     }
+
+    // Rede de seguranca para a lista de participantes: se o grupo foi ativado
+    // e nunca sincronizou, ninguem dele seria reconhecido no privado. Roda uma
+    // vez so, na primeira mensagem apos a ativacao.
+    await garantirParticipantes(grupo)
   } else {
     const resultadoPrivado = await tratarPrivado({ numeroContato, config, texto, messageId })
     if (resultadoPrivado) return resultadoPrivado
@@ -515,6 +522,30 @@ async function responder(contexto: Contexto, texto: string, porIA: boolean): Pro
 // Auxiliares de banco
 // ---------------------------------------------------------------------------
 
+/**
+ * Garante que o grupo tenha participantes sincronizados.
+ *
+ * Nao falha o fluxo se der errado: a lista serve para liberar mensagem
+ * privada, e atendimento no grupo funciona sem ela.
+ */
+async function garantirParticipantes(grupo: Grupo): Promise<void> {
+  const supabase = criarClienteAdmin()
+
+  const { count } = await supabase
+    .from('whatsapp_grupo_participantes')
+    .select('id', { count: 'exact', head: true })
+    .eq('grupo_id', grupo.id)
+
+  if (count && count > 0) return
+
+  const resultado = await sincronizarParticipantes(grupo)
+  if (!resultado.ok) {
+    console.error(`[fluxo] falha ao sincronizar participantes de ${grupo.nome}:`, resultado.erro)
+  } else {
+    console.log(`[fluxo] ${resultado.participantes} participantes sincronizados em ${grupo.nome}`)
+  }
+}
+
 /** Busca o grupo; se for desconhecido, cadastra desativado para aparecer na UI. */
 async function resolverGrupo(grupoIdZAPI: string, nome: string | null): Promise<Grupo | null> {
   const supabase = criarClienteAdmin()
@@ -557,14 +588,36 @@ async function tratarPrivado(opcoes: OpcoesPrivado): Promise<ResultadoProcessame
   const { numeroContato, config } = opcoes
   const supabase = criarClienteAdmin()
 
-  // Desligado: segue o fluxo normal e abre chamado privado.
-  if (!config.redirecionar_privado) return null
-
   // O numero de alerta e o proprio operador falando com o sistema -- nao
   // faz sentido mandar ele "falar no grupo".
   if (config.numero_alerta && telefonesBatem(numeroContato, config.numero_alerta)) {
     return { acao: 'ignorado', detalhe: 'mensagem do proprio operador' }
   }
+
+  // ---------------------------------------------------------------------
+  // Porteiro: so quem participa de um grupo ATIVO interage pelo privado.
+  //
+  // Sem isto, qualquer pessoa que mandasse mensagem no numero -- parente,
+  // cliente de outro assunto, numero desconhecido -- recebia resposta
+  // automatica de suporte. O numero do WhatsApp e usado para outras coisas
+  // alem desta ferramenta, e ela nao pode responder por ele.
+  //
+  // Consequencia intencional: sem nenhum grupo ativo, nenhuma mensagem
+  // privada e respondida. Nao ha suporte acontecendo, entao nao ha a quem
+  // responder.
+  //
+  // Retorna ANTES de a mensagem ser gravada: quem nao e do suporte nao vira
+  // registro no painel.
+  // ---------------------------------------------------------------------
+  if (!(await participaDeGrupoAtivo(numeroContato))) {
+    return {
+      acao: 'privado_fora_do_escopo',
+      detalhe: `${numeroContato} nao participa de nenhum grupo ativo`,
+    }
+  }
+
+  // Desligado: segue o fluxo normal e abre chamado privado.
+  if (!config.redirecionar_privado) return null
 
   const { data: aviso } = await supabase
     .from('whatsapp_avisos_privado')

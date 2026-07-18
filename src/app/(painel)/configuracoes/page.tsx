@@ -25,6 +25,8 @@ export default function PaginaConfiguracoes() {
   const [aprendidos, setAprendidos] = useState<{ id: string; problema: string; solucao: string; created_at: string }[]>([])
   const [aviso, setAviso] = useState<string | null>(null)
   const [novoNumero, setNovoNumero] = useState('')
+  const [participantes, setParticipantes] = useState<Record<string, number>>({})
+  const [sincronizando, setSincronizando] = useState<string | null>(null)
 
   const carregar = useCallback(async () => {
     const [c, g, i, a] = await Promise.all([
@@ -39,9 +41,23 @@ export default function PaginaConfiguracoes() {
     ])
 
     setConfig((c.data as unknown as Config) ?? null)
-    setGrupos((g.data ?? []) as unknown as Grupo[])
+    const listaGrupos = (g.data ?? []) as unknown as Grupo[]
+    setGrupos(listaGrupos)
     setIgnorados((i.data ?? []) as unknown as typeof ignorados)
     setAprendidos((a.data ?? []) as unknown as typeof aprendidos)
+
+    // Conta participantes por grupo com head+count: traz so o numero, sem
+    // baixar as linhas (um grupo pode ter centenas).
+    const contagens = await Promise.all(
+      listaGrupos.map(async (grupo) => {
+        const { count } = await supabase
+          .from('whatsapp_grupo_participantes')
+          .select('id', { count: 'exact', head: true })
+          .eq('grupo_id', grupo.id)
+        return [grupo.id, count ?? 0] as const
+      }),
+    )
+    setParticipantes(Object.fromEntries(contagens))
   }, [supabase])
 
   useEffect(() => {
@@ -86,6 +102,36 @@ export default function PaginaConfiguracoes() {
     } else {
       mostrarAviso('Salvo.')
     }
+  }
+
+  async function sincronizarParticipantes(grupoId: string) {
+    setSincronizando(grupoId)
+
+    const resposta = await fetch('/api/whatsapp/grupos/sincronizar', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ grupoId }),
+    })
+
+    const corpo = (await resposta.json().catch(() => ({}))) as {
+      resultados?: { participantes: number; erro: string | null }[]
+      erro?: string
+    }
+
+    setSincronizando(null)
+
+    if (!resposta.ok) {
+      mostrarAviso(corpo.erro ?? 'Falha ao atualizar a lista.')
+      return
+    }
+
+    const resultado = corpo.resultados?.[0]
+    mostrarAviso(
+      resultado?.erro
+        ? `Falha: ${resultado.erro}`
+        : `${resultado?.participantes ?? 0} participantes atualizados.`,
+    )
+    void carregar()
   }
 
   async function removerGrupo(grupo: Grupo) {
@@ -223,11 +269,17 @@ export default function PaginaConfiguracoes() {
       <section className="space-y-4 rounded-xl border border-slate-200 bg-white p-5">
         <h2 className="font-medium">Mensagens no privado</h2>
 
+        <p className="rounded-lg bg-emerald-50 p-3 text-xs text-emerald-900">
+          <strong>Só participantes de grupos ativos recebem qualquer resposta no privado.</strong>{' '}
+          Mensagem de quem não está em nenhum grupo ativo é ignorada por completo — não recebe
+          aviso e não aparece no painel. Se nenhum grupo estiver ativo, ninguém recebe nada.
+        </p>
+
         <Interruptor
           ligado={config.redirecionar_privado}
           aoAlternar={(v) => salvarConfig({ redirecionar_privado: v })}
           titulo="Redirecionar para o grupo"
-          descricao="Quem chamar no privado recebe a mensagem abaixo e nao abre chamado. Desligado, mensagens privadas viram atendimento normal."
+          descricao="Participante de grupo ativo que chamar no privado recebe a mensagem abaixo, em vez de abrir chamado. Desligado, vira atendimento privado normal."
         />
 
         <label className="block space-y-1">
@@ -368,6 +420,28 @@ export default function PaginaConfiguracoes() {
                     minutos minimos entre respostas automaticas para a mesma pessoa (0 desliga)
                   </span>
                 </label>
+
+                <div className="flex flex-wrap items-center gap-3 rounded-lg bg-slate-50 p-3">
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm font-medium">
+                      Participantes:{' '}
+                      {participantes[grupo.id] === undefined
+                        ? '...'
+                        : participantes[grupo.id].toLocaleString('pt-BR')}
+                    </p>
+                    <p className="text-xs text-slate-500">
+                      Define quem pode falar no privado com a ferramenta. Atualize se entrou ou
+                      saiu gente do grupo.
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => sincronizarParticipantes(grupo.id)}
+                    disabled={sincronizando === grupo.id}
+                    className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs hover:bg-white disabled:opacity-50"
+                  >
+                    {sincronizando === grupo.id ? 'Atualizando...' : 'Atualizar lista'}
+                  </button>
+                </div>
 
                 <label className="block space-y-1">
                   <span className="text-sm font-medium">Mensagem fora do horario</span>
