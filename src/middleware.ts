@@ -31,11 +31,43 @@ export async function middleware(request: NextRequest) {
 
   if (ehPublica(pathname)) return NextResponse.next()
 
+  // Sem as variaveis do Supabase, createServerClient lanca -- e uma excecao
+  // no middleware derruba TODAS as rotas com MIDDLEWARE_INVOCATION_FAILED,
+  // um erro que nao diz o que faltou.
+  //
+  // A pegadinha: variaveis NEXT_PUBLIC_* sao gravadas no bundle durante o
+  // build. Adicionar na Vercel depois do deploy nao tem efeito nenhum ate
+  // rodar um Redeploy.
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL
+  const chaveAnon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
+
+  if (!url || !chaveAnon) {
+    const faltando = [
+      !url ? 'NEXT_PUBLIC_SUPABASE_URL' : null,
+      !chaveAnon ? 'NEXT_PUBLIC_SUPABASE_ANON_KEY' : null,
+    ]
+      .filter(Boolean)
+      .join(', ')
+
+    console.error(`[middleware] variaveis de ambiente ausentes: ${faltando}`)
+
+    return NextResponse.json(
+      {
+        erro: 'Aplicacao nao configurada',
+        faltando: faltando.split(', '),
+        comoResolver:
+          'Adicione as variaveis em Vercel > Settings > Environment Variables e rode um Redeploy. ' +
+          'Variaveis NEXT_PUBLIC_* so entram no bundle durante o build, entao adicionar sem redeploy nao resolve.',
+      },
+      { status: 503 },
+    )
+  }
+
   let resposta = NextResponse.next({ request })
 
   const supabase = createServerClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    url,
+    chaveAnon,
     {
       cookies: {
         getAll() {
