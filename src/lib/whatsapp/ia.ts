@@ -1,0 +1,405 @@
+// Camada de IA.
+//
+// A IA aqui NAO e um chatbot de conversa livre. Ela tem duas funcoes
+// estritas e nada alem disso:
+//
+//   1. classificar()  -- essa mensagem no grupo e um chamado de suporte,
+//                        uma conversa solta, ou um retorno sobre um chamado
+//                        que ja esta em andamento?
+//   2. diagnosticar() -- dado o problema relatado e os casos cadastrados na
+//                        base, qual caso se aplica e qual o passo-a-passo?
+//
+// Duas travas duras, no codigo e nao no prompt (prompt se contorna):
+//
+//   - Sem caso compativel na base, ela NAO responde. Escala.
+//   - Qualquer falha (API fora, JSON invalido, timeout) escala.
+//
+// O pior resultado possivel e o cliente receber um procedimento inventado.
+// O segundo pior e ficar sem resposta e sem ninguem avisado. Escalar resolve
+// os dois.
+
+import Groq from 'groq-sdk'
+import type { CasoConhecimento } from '@/lib/tipos'
+
+const MODELO_RESPOSTA = process.env.GROQ_MODEL_RESPOSTA || 'llama-3.3-70b-versatile'
+const MODELO_CLASSIFICACAO = process.env.GROQ_MODEL_CLASSIFICACAO || 'llama-3.1-8b-instant'
+const MODELO_VISAO = process.env.GROQ_MODEL_VISAO || 'meta-llama/llama-4-scout-17b-16e-instruct'
+
+let cliente: Groq | null = null
+
+function obterCliente(): Groq | null {
+  if (!process.env.GROQ_API_KEY) return null
+  if (!cliente) cliente = new Groq({ apiKey: process.env.GROQ_API_KEY })
+  return cliente
+}
+
+export function iaDisponivel(): boolean {
+  return Boolean(process.env.GROQ_API_KEY)
+}
+
+// ---------------------------------------------------------------------------
+// 1. Classificacao
+// ---------------------------------------------------------------------------
+
+export type TipoMensagemClassificada =
+  /** Relato de problema -- abre ou alimenta um chamado. */
+  | 'solicitacao'
+  /** Bom dia, obrigado, conversa entre membros -- nao vira chamado. */
+  | 'conversa'
+  /** Cliente confirmou que a orientacao resolveu. */
+  | 'resolvido'
+  /** Cliente disse que tentou e nao resolveu -- gatilho de escalonamento. */
+  | 'nao_resolvido'
+  /** Pediu explicitamente para falar com uma pessoa. */
+  | 'pedido_humano'
+
+export interface Classificacao {
+  tipo: TipoMensagemClassificada
+  urgencia: 'baixa' | 'normal' | 'alta'
+  resumo: string
+}
+
+const PROMPT_CLASSIFICACAO = `Voce classifica mensagens de um grupo de WhatsApp de suporte tecnico.
+
+Responda APENAS com JSON: {"tipo": "...", "urgencia": "...", "resumo": "..."}
+
+Valores de "tipo":
+- "solicitacao"   : relata um problema, erro, falha, ou pede ajuda tecnica.
+- "conversa"      : saudacao, agradecimento, confirmacao vazia, papo entre membros, mensagem sem pedido.
+- "resolvido"     : confirma que a orientacao anterior funcionou ("deu certo", "resolveu", "voltou a funcionar").
+- "nao_resolvido" : diz que tentou e continua com problema ("nao funcionou", "continua igual", "ja tentei isso").
+- "pedido_humano" : pede explicitamente falar com uma pessoa/atendente/responsavel.
+
+Valores de "urgencia": "baixa", "normal", "alta".
+Use "alta" so quando a operacao esta parada: sistema fora do ar, ninguem consegue trabalhar, prejuizo em andamento.
+
+"resumo": no maximo 12 palavras, descrevendo o problema. String vazia se tipo for "conversa".
+
+Na duvida entre "solicitacao" e "conversa", escolha "conversa" -- e melhor deixar passar um chamado (o atendente ve a mensagem no painel de qualquer forma) do que encher o painel de ruido.`
+
+export interface OpcoesClassificacao {
+  texto: string
+  /** True quando o participante ja tem chamado aberto -- muda a leitura de
+   *  "nao funcionou" de conversa solta para retorno sobre o chamado. */
+  temChamadoAberto: boolean
+  /** Ultima orientacao enviada pelo bot, se houver. */
+  ultimaResposta?: string | null
+}
+
+export async function classificar(opcoes: OpcoesClassificacao): Promise<Classificacao> {
+  const { texto, temChamadoAberto, ultimaResposta } = opcoes
+
+  // Sem IA: trata tudo como solicitacao. Prefere ruido a perder chamado.
+  const groq = obterCliente()
+  if (!groq || !texto?.trim()) {
+    return { tipo: 'solicitacao', urgencia: 'normal', resumo: texto?.slice(0, 80) ?? '' }
+  }
+
+  const contexto = temChamadoAberto
+    ? `\n\nContexto: esta pessoa JA tem um chamado em andamento.${
+        ultimaResposta ? ` A ultima orientacao enviada foi: "${ultimaResposta.slice(0, 300)}"` : ''
+      }`
+    : '\n\nContexto: esta pessoa nao tem chamado em andamento.'
+
+  try {
+    const resposta = await groq.chat.completions.create(
+      {
+        model: MODELO_CLASSIFICACAO,
+        temperature: 0,
+        max_tokens: 150,
+        response_format: { type: 'json_object' },
+        messages: [
+          { role: 'system', content: PROMPT_CLASSIFICACAO + contexto },
+          { role: 'user', content: texto.slice(0, 1500) },
+        ],
+      },
+      { timeout: 12_000 },
+    )
+
+    const bruto = JSON.parse(resposta.choices[0]?.message?.content || '{}') as Partial<Classificacao>
+
+    const tiposValidos: TipoMensagemClassificada[] = [
+      'solicitacao', 'conversa', 'resolvido', 'nao_resolvido', 'pedido_humano',
+    ]
+
+    return {
+      tipo: tiposValidos.includes(bruto.tipo as TipoMensagemClassificada)
+        ? (bruto.tipo as TipoMensagemClassificada)
+        : 'solicitacao',
+      urgencia: (['baixa', 'normal', 'alta'] as const).includes(bruto.urgencia as 'normal')
+        ? (bruto.urgencia as 'baixa' | 'normal' | 'alta')
+        : 'normal',
+      resumo: typeof bruto.resumo === 'string' ? bruto.resumo.slice(0, 120) : '',
+    }
+  } catch {
+    // Classificador fora do ar nao pode engolir chamado.
+    return { tipo: 'solicitacao', urgencia: 'normal', resumo: texto.slice(0, 80) }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 2. Pre-filtro da base de conhecimento
+// ---------------------------------------------------------------------------
+
+/**
+ * Reduz a base a um punhado de candidatos antes de chamar o modelo grande.
+ *
+ * Motivo: a base cresce e mandar tudo no prompt fica caro e degrada a
+ * qualidade. Pontuacao simples por sobreposicao de termos -- suficiente ate
+ * algumas centenas de casos. Passando disso, trocar por embeddings + pgvector.
+ */
+export function preFiltrarCasos(
+  texto: string,
+  casos: CasoConhecimento[],
+  limite = 12,
+): CasoConhecimento[] {
+  const normalizar = (s: string) =>
+    s
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/[̀-ͯ]/g, '') // remove acentos combinantes
+      .replace(/[^a-z0-9\s]/g, ' ')
+
+  const palavrasVazias = new Set([
+    'a', 'o', 'as', 'os', 'de', 'da', 'do', 'em', 'no', 'na', 'um', 'uma',
+    'para', 'com', 'que', 'e', 'nao', 'esta', 'ta', 'meu', 'minha', 'pra',
+  ])
+
+  const termos = new Set(
+    normalizar(texto)
+      .split(/\s+/)
+      .filter((t) => t.length > 2 && !palavrasVazias.has(t)),
+  )
+
+  if (termos.size === 0) return casos.slice(0, limite)
+
+  const pontuados = casos.map((caso) => {
+    const alvo = normalizar(
+      [caso.titulo, caso.categoria ?? '', ...caso.sintomas, caso.causa ?? ''].join(' '),
+    )
+    const palavrasAlvo = new Set(alvo.split(/\s+/).filter(Boolean))
+
+    let pontos = 0
+    for (const termo of termos) {
+      if (palavrasAlvo.has(termo)) pontos += 3
+      else if (alvo.includes(termo)) pontos += 1 // casa parcial: "bomba" em "bombeamento"
+    }
+
+    // Sintoma cadastrado que aparece inteiro na mensagem e sinal forte.
+    for (const sintoma of caso.sintomas) {
+      if (sintoma.length > 4 && normalizar(texto).includes(normalizar(sintoma))) pontos += 8
+    }
+
+    return { caso, pontos: pontos + caso.prioridade }
+  })
+
+  const comMatch = pontuados.filter((p) => p.pontos > 0)
+
+  // Nenhum termo casou: manda os de maior prioridade e deixa o modelo decidir.
+  // Ele ainda pode concluir que nenhum se aplica e escalar.
+  const selecionados = comMatch.length > 0 ? comMatch : pontuados
+
+  return selecionados
+    .sort((a, b) => b.pontos - a.pontos)
+    .slice(0, limite)
+    .map((p) => p.caso)
+}
+
+// ---------------------------------------------------------------------------
+// 3. Diagnostico
+// ---------------------------------------------------------------------------
+
+export interface Diagnostico {
+  /** Texto pronto para enviar, ou null se for escalar. */
+  texto: string | null
+  escalar: boolean
+  /** Caso da base que embasou a resposta. */
+  casoId: string | null
+  motivo: string
+  confianca: 'alta' | 'media' | 'baixa'
+}
+
+const PROMPT_DIAGNOSTICO = `Voce e um assistente de suporte tecnico que responde em um grupo de WhatsApp.
+
+REGRA ABSOLUTA: voce so pode orientar com base nos CASOS CONHECIDOS fornecidos abaixo.
+Voce NAO tem conhecimento proprio sobre este sistema. Nao deduza, nao improvise,
+nao adapte procedimento de um caso para outro problema, nao invente passo nenhum.
+Se nenhum caso descrever o problema relatado, escale. Escalar e a resposta certa
+e esperada -- nao e falha sua.
+
+Responda APENAS com JSON:
+{"caso_id": "...", "texto": "...", "escalar": true|false, "confianca": "alta|media|baixa", "motivo": "..."}
+
+Quando UM caso claramente corresponde ao problema:
+- "escalar": false
+- "caso_id": o id exato do caso usado
+- "texto": a orientacao para o cliente, em portugues do Brasil
+- "confianca": "alta" se os sintomas batem direto, "media" se e provavel
+
+Quando NENHUM caso corresponde, ou voce esta em duvida entre casos muito diferentes,
+ou o problema parece mais grave do que os casos cobrem:
+- "escalar": true
+- "texto": null
+- "motivo": uma frase curta explicando por que escalou
+
+Como escrever "texto":
+- Comece com uma frase curta reconhecendo o problema.
+- Depois os passos, numerados, na ordem exata do caso. Nao pule nem reordene.
+- Um passo por linha. Frases curtas, linguagem simples, sem jargao.
+- Termine pedindo que a pessoa avise se funcionou ou nao.
+- Use *asterisco simples* para negrito (formato do WhatsApp), nunca **duplo**.
+- Maximo de 900 caracteres. Sem markdown de titulo, sem bullet com hifen.
+- Nao mencione "caso", "base de conhecimento" nem nada interno do sistema.`
+
+export interface OpcoesDiagnostico {
+  /** Problema relatado pelo cliente. */
+  problema: string
+  /** Casos candidatos, ja pre-filtrados. */
+  casos: CasoConhecimento[]
+  /** Ultimas mensagens do chamado, mais antiga primeiro. */
+  historico?: { direcao: 'recebida' | 'enviada'; conteudo: string }[]
+  /** Casos resolvidos por humanos, como contexto complementar. */
+  aprendidos?: { problema: string; solucao: string }[]
+  /** URL publica de imagem enviada pelo cliente (print de erro). */
+  imagemUrl?: string | null
+  /** Nome de quem pediu, para personalizar o tratamento. */
+  nomeContato?: string | null
+  /** Fora da janela de atendimento: avisa que humano so volta depois. */
+  foraDoHorario?: boolean
+  /** Aviso a acrescentar quando fora do horario. */
+  avisoHorario?: string | null
+}
+
+export async function diagnosticar(opcoes: OpcoesDiagnostico): Promise<Diagnostico> {
+  const { problema, casos, historico, aprendidos, imagemUrl, nomeContato } = opcoes
+
+  const escalar = (motivo: string): Diagnostico => ({
+    texto: null,
+    escalar: true,
+    casoId: null,
+    motivo,
+    confianca: 'baixa',
+  })
+
+  // --- Travas duras --------------------------------------------------------
+  const groq = obterCliente()
+  if (!groq) return escalar('IA nao configurada (GROQ_API_KEY ausente)')
+  if (!casos.length) return escalar('Nenhum caso cadastrado na base de conhecimento')
+  if (!problema?.trim()) return escalar('Mensagem sem texto para diagnosticar')
+
+  // Caso marcado como escalar_direto que bate sozinho: nem chama o modelo.
+  if (casos.length === 1 && casos[0].escalar_direto) {
+    return { ...escalar(`Caso "${casos[0].titulo}" exige atendimento humano`), casoId: casos[0].id }
+  }
+
+  // --- Monta o contexto ----------------------------------------------------
+  const blocos: string[] = []
+
+  blocos.push(
+    'CASOS CONHECIDOS:\n' +
+      casos
+        .map((c) => {
+          const partes = [
+            `[id: ${c.id}]`,
+            `Titulo: ${c.titulo}`,
+            c.categoria ? `Categoria: ${c.categoria}` : null,
+            c.sintomas.length ? `Sintomas relatados pelo cliente: ${c.sintomas.join('; ')}` : null,
+            c.causa ? `Causa: ${c.causa}` : null,
+            c.passos.length
+              ? `Passos:\n${c.passos.map((p, i) => `  ${i + 1}. ${p}`).join('\n')}`
+              : null,
+            c.observacao ? `Observacao final: ${c.observacao}` : null,
+            c.escalar_direto
+              ? 'ATENCAO: este caso NAO pode ser resolvido pelo bot. Se ele corresponder, escale.'
+              : null,
+          ].filter(Boolean)
+          return partes.join('\n')
+        })
+        .join('\n\n---\n\n'),
+  )
+
+  if (aprendidos?.length) {
+    blocos.push(
+      'CASOS RESOLVIDOS ANTERIORMENTE POR ATENDENTES (contexto complementar, ' +
+        'use com mais cautela que os casos oficiais acima):\n' +
+        aprendidos
+          .slice(0, 20)
+          .map((a) => `- Problema: ${a.problema}\n  Solucao: ${a.solucao}`)
+          .join('\n'),
+    )
+  }
+
+  if (historico?.length) {
+    blocos.push(
+      'HISTORICO DESTA CONVERSA (mais antiga primeiro):\n' +
+        historico
+          .slice(-8)
+          .map((m) => `${m.direcao === 'recebida' ? 'Cliente' : 'Suporte'}: ${m.conteudo}`)
+          .join('\n'),
+    )
+  }
+
+  if (nomeContato) blocos.push(`Nome de quem pediu ajuda: ${nomeContato}`)
+
+  // --- Chamada -------------------------------------------------------------
+  const usarVisao = Boolean(imagemUrl)
+
+  const conteudoUsuario = usarVisao
+    ? [
+        { type: 'text' as const, text: `Problema relatado: ${problema}` },
+        { type: 'image_url' as const, image_url: { url: imagemUrl! } },
+      ]
+    : `Problema relatado: ${problema}`
+
+  try {
+    const resposta = await groq.chat.completions.create(
+      {
+        model: usarVisao ? MODELO_VISAO : MODELO_RESPOSTA,
+        temperature: 0.2,
+        max_tokens: 700,
+        response_format: { type: 'json_object' },
+        messages: [
+          { role: 'system', content: `${PROMPT_DIAGNOSTICO}\n\n${blocos.join('\n\n')}` },
+          // O SDK aceita string ou array de partes; o cast cobre os dois.
+          { role: 'user', content: conteudoUsuario as unknown as string },
+        ],
+      },
+      { timeout: 25_000 },
+    )
+
+    const bruto = JSON.parse(resposta.choices[0]?.message?.content || '{}') as {
+      caso_id?: string
+      texto?: string | null
+      escalar?: boolean
+      confianca?: string
+      motivo?: string
+    }
+
+    if (bruto.escalar === true) {
+      return escalar(bruto.motivo || 'A IA nao encontrou caso correspondente na base')
+    }
+
+    const texto = typeof bruto.texto === 'string' ? bruto.texto.trim() : ''
+    if (!texto) return escalar('A IA nao produziu resposta utilizavel')
+
+    // O caso citado tem que existir de verdade entre os candidatos. Se o
+    // modelo devolveu um id inventado, a resposta nao esta ancorada na base.
+    const caso = casos.find((c) => c.id === bruto.caso_id)
+    if (!caso) return escalar('A IA citou um caso inexistente -- resposta nao confiavel')
+    if (caso.escalar_direto) {
+      return { ...escalar(`Caso "${caso.titulo}" exige atendimento humano`), casoId: caso.id }
+    }
+
+    return {
+      texto: texto.slice(0, 1000),
+      escalar: false,
+      casoId: caso.id,
+      motivo: `Caso aplicado: ${caso.titulo}`,
+      confianca: (['alta', 'media', 'baixa'] as const).includes(bruto.confianca as 'alta')
+        ? (bruto.confianca as 'alta' | 'media' | 'baixa')
+        : 'media',
+    }
+  } catch (e) {
+    return escalar(e instanceof Error ? `Falha na IA: ${e.message}` : 'Falha desconhecida na IA')
+  }
+}

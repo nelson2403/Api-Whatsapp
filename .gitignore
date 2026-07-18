@@ -1,0 +1,22 @@
+node_modules/
+.next/
+out/
+build/
+dist/
+
+# Segredos -- NUNCA versionar. Use .env.example como referencia.
+.env
+.env.local
+.env*.local
+
+*.tsbuildinfo
+next-env.d.ts
+
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+npm-debug.log*
+yarn-error.log*
+.vercel

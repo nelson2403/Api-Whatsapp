@@ -1,0 +1,33 @@
+@import 'tailwindcss';
+
+@theme {
+  --color-zap: #128c7e;
+  --color-zap-claro: #25d366;
+  --color-zap-bolha: #d9fdd3;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  @apply bg-slate-100 text-slate-900 antialiased;
+}
+
+/* Mensagens do WhatsApp vem com quebra de linha e o texto precisa preserva-la.
+   Na ferramenta anterior isso foi um bug: os campos eram <input>, que nao
+   aceita quebra, e a exibicao colapsava tudo numa linha so. */
+.texto-mensagem {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* Pulso do alerta de escalonamento. */
+@keyframes pulso-alerta {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
+.pulsando {
+  animation: pulso-alerta 1s ease-in-out infinite;
+}
