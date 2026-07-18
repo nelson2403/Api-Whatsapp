@@ -86,9 +86,22 @@ export async function middleware(request: NextRequest) {
 
   // getUser() revalida o token no servidor. Nao troque por getSession(), que
   // confia no cookie sem verificar.
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
+  //
+  // O try/catch nao e decorativo: sem cookie de sessao esta chamada pode
+  // lancar (AuthSessionMissingError, falha de rede ao contatar o Supabase),
+  // e excecao em middleware derruba a requisicao inteira com
+  // MIDDLEWARE_INVOCATION_FAILED -- 500 em toda pagina e toda API, inclusive
+  // no caminho de quem so queria chegar na tela de login.
+  //
+  // Falhar aqui significa "nao consegui provar que esta autenticado", que e
+  // exatamente o mesmo tratamento de nao estar: manda para o login.
+  let user = null
+  try {
+    const resultado = await supabase.auth.getUser()
+    user = resultado.data.user
+  } catch (e) {
+    console.error('[middleware] falha ao validar a sessao:', e)
+  }
 
   if (!user) {
     // API responde 401; navegacao vai para o login.
