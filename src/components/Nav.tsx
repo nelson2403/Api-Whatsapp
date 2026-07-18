@@ -46,8 +46,11 @@ export default function Nav({ nome }: { nome: string }) {
 
   return (
     <header className="border-b border-slate-200 bg-white">
-      <div className="mx-auto flex max-w-7xl flex-wrap items-center gap-4 px-4 py-3">
-        <span className="text-lg font-semibold text-[var(--color-zap)]">Central de Suporte</span>
+      <div className="mx-auto flex max-w-7xl flex-wrap items-center gap-2 px-3 py-2 sm:gap-4 sm:px-4 sm:py-3">
+        <span className="text-base font-semibold text-[var(--color-zap)] sm:text-lg">
+          <span className="sm:hidden">Suporte</span>
+          <span className="hidden sm:inline">Central de Suporte</span>
+        </span>
 
         <nav className="flex gap-1">
           {LINKS.map((link) => {
@@ -56,22 +59,24 @@ export default function Nav({ nome }: { nome: string }) {
               <Link
                 key={link.href}
                 href={link.href}
-                className={`rounded-lg px-3 py-1.5 text-sm font-medium transition ${
+                title={link.rotulo}
+                className={`rounded-lg px-2.5 py-1.5 text-sm font-medium transition sm:px-3 ${
                   ativo
                     ? 'bg-[var(--color-zap)] text-white'
                     : 'text-slate-600 hover:bg-slate-100'
                 }`}
               >
-                <span className="mr-1.5" aria-hidden>
+                <span className="md:mr-1.5" aria-hidden>
                   {link.icone}
                 </span>
-                {link.rotulo}
+                {/* No celular so o icone: os tres rotulos nao cabem na barra */}
+                <span className="hidden md:inline">{link.rotulo}</span>
               </Link>
             )
           })}
         </nav>
 
-        <div className="ml-auto flex items-center gap-3">
+        <div className="ml-auto flex items-center gap-2 sm:gap-3">
           {status && (
             <span
               title={
@@ -79,16 +84,19 @@ export default function Nav({ nome }: { nome: string }) {
                   ? status.zapi.erro ?? 'WhatsApp desconectado -- refaca o pareamento no Z-API'
                   : 'WhatsApp conectado'
               }
-              className={`flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium ${
+              className={`flex items-center gap-1.5 rounded-full px-2 py-1 text-xs font-medium sm:px-2.5 ${
                 desconectado ? 'bg-red-100 text-red-700' : 'bg-emerald-100 text-emerald-700'
               }`}
             >
               <span
-                className={`h-2 w-2 rounded-full ${
+                className={`h-2 w-2 shrink-0 rounded-full ${
                   desconectado ? 'bg-red-500' : 'bg-emerald-500'
                 }`}
               />
-              {desconectado ? 'WhatsApp desconectado' : 'WhatsApp conectado'}
+              {/* No celular fica so a bolinha colorida; o texto vai no title */}
+              <span className="hidden lg:inline">
+                {desconectado ? 'WhatsApp desconectado' : 'WhatsApp conectado'}
+              </span>
             </span>
           )}
 

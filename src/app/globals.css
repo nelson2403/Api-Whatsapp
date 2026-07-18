@@ -13,6 +13,21 @@ body {
 
 body {
   @apply bg-slate-100 text-slate-900 antialiased;
+  /* viewportFit: 'cover' deixa o conteudo ir sob o notch e a barra de gestos.
+     Estas margens devolvem o espaco seguro quando instalado como app. */
+  padding-left: env(safe-area-inset-left);
+  padding-right: env(safe-area-inset-right);
+  padding-bottom: env(safe-area-inset-bottom);
+}
+
+/* No iOS, campo com fonte menor que 16px faz a tela dar zoom sozinha ao
+   receber foco -- e nao volta. Os inputs usam text-base no celular por isso. */
+@media (max-width: 640px) {
+  input,
+  textarea,
+  select {
+    font-size: 16px;
+  }
 }
 
 /* Mensagens do WhatsApp vem com quebra de linha e o texto precisa preserva-la.

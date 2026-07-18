@@ -4,11 +4,15 @@
 //
 // Leitura e escrita falam direto com o Supabase sob RLS -- so o envio de
 // mensagem passa por rota de servidor, porque o token do Z-API e segredo.
+//
+// Layout: duas colunas no desktop. No celular nao cabem lado a lado, entao
+// vira uma tela de cada vez -- lista, ou conversa com botao de voltar. E o
+// mesmo padrao do proprio WhatsApp, ninguem precisa aprender nada.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { criarClienteNavegador } from '@/lib/supabase/client'
 import { formatarTelefone } from '@/lib/whatsapp/telefone'
-import type { Atendimento, Mensagem, Perfil, StatusAtendimento } from '@/lib/tipos'
+import type { Atendimento, Mensagem, Perfil } from '@/lib/tipos'
 
 interface AtendimentoComGrupo extends Atendimento {
   grupo: { nome: string } | null
@@ -17,11 +21,11 @@ interface AtendimentoComGrupo extends Atendimento {
 
 type Aba = 'atencao' | 'abertos' | 'meus' | 'encerrados'
 
-const ABAS: { id: Aba; rotulo: string }[] = [
-  { id: 'atencao', rotulo: 'Precisa de atendente' },
-  { id: 'abertos', rotulo: 'Em aberto' },
-  { id: 'meus', rotulo: 'Meus' },
-  { id: 'encerrados', rotulo: 'Encerrados' },
+const ABAS: { id: Aba; rotulo: string; curto: string }[] = [
+  { id: 'atencao', rotulo: 'Precisa de atendente', curto: 'Atenção' },
+  { id: 'abertos', rotulo: 'Em aberto', curto: 'Abertos' },
+  { id: 'meus', rotulo: 'Meus', curto: 'Meus' },
+  { id: 'encerrados', rotulo: 'Encerrados', curto: 'Encerrados' },
 ]
 
 export default function Inbox({ perfil }: { perfil: Perfil }) {
@@ -35,6 +39,7 @@ export default function Inbox({ perfil }: { perfil: Perfil }) {
   const [enviando, setEnviando] = useState(false)
   const [erroEnvio, setErroEnvio] = useState<string | null>(null)
   const [modalEncerrar, setModalEncerrar] = useState(false)
+  const [excluindo, setExcluindo] = useState(false)
 
   const fimDaListaRef = useRef<HTMLDivElement>(null)
 
@@ -114,6 +119,7 @@ export default function Inbox({ perfil }: { perfil: Perfil }) {
   }, [mensagens])
 
   const selecionado = atendimentos.find((a) => a.id === selecionadoId) ?? null
+  const encerrado = selecionado ? ['encerrado', 'resolvido'].includes(selecionado.status) : false
 
   // --- Acoes ---------------------------------------------------------------
 
@@ -193,12 +199,49 @@ export default function Inbox({ perfil }: { perfil: Perfil }) {
     void carregarAtendimentos()
   }
 
+  async function excluir() {
+    if (!selecionado) return
+
+    const quem = selecionado.contato_nome || formatarTelefone(selecionado.contato_numero)
+    if (
+      !confirm(
+        `Excluir o atendimento de ${quem}?\n\n` +
+          'Todo o historico de mensagens dele sera apagado e nao tem como recuperar. ' +
+          'O que voce registrou na base de conhecimento nao e afetado.',
+      )
+    ) {
+      return
+    }
+
+    setExcluindo(true)
+
+    // As mensagens e os alertas somem por cascata (ON DELETE CASCADE).
+    const { error } = await supabase
+      .from('whatsapp_atendimentos')
+      .delete()
+      .eq('id', selecionado.id)
+
+    setExcluindo(false)
+
+    if (error) {
+      setErroEnvio(`Nao foi possivel excluir: ${error.message}`)
+      return
+    }
+
+    setSelecionadoId(null)
+    void carregarAtendimentos()
+  }
+
   // --- Render --------------------------------------------------------------
 
   return (
-    <div className="mx-auto flex max-w-7xl gap-4 p-4">
-      {/* Lista */}
-      <aside className="flex w-80 shrink-0 flex-col rounded-xl border border-slate-200 bg-white">
+    <div className="mx-auto flex max-w-7xl gap-4 p-2 sm:p-4">
+      {/* Lista -- no celular some quando ha conversa aberta */}
+      <aside
+        className={`w-full shrink-0 flex-col rounded-xl border border-slate-200 bg-white lg:flex lg:w-80 ${
+          selecionadoId ? 'hidden lg:flex' : 'flex'
+        }`}
+      >
         <div className="flex flex-wrap gap-1 border-b border-slate-200 p-2">
           {ABAS.map((a) => (
             <button
@@ -208,12 +251,13 @@ export default function Inbox({ perfil }: { perfil: Perfil }) {
                 aba === a.id ? 'bg-[var(--color-zap)] text-white' : 'text-slate-600 hover:bg-slate-100'
               }`}
             >
-              {a.rotulo}
+              <span className="sm:hidden">{a.curto}</span>
+              <span className="hidden sm:inline">{a.rotulo}</span>
             </button>
           ))}
         </div>
 
-        <div className="flex-1 overflow-y-auto" style={{ maxHeight: 'calc(100vh - 190px)' }}>
+        <div className="flex-1 overflow-y-auto lg:max-h-[calc(100vh-190px)]">
           {atendimentos.length === 0 && (
             <p className="p-6 text-center text-sm text-slate-400">Nenhum atendimento aqui.</p>
           )}
@@ -267,18 +311,28 @@ export default function Inbox({ perfil }: { perfil: Perfil }) {
         </div>
       </aside>
 
-      {/* Conversa */}
+      {/* Conversa -- no celular ocupa a tela inteira quando aberta */}
       <section
-        className="flex min-w-0 flex-1 flex-col rounded-xl border border-slate-200 bg-white"
-        style={{ height: 'calc(100vh - 130px)' }}
+        className={`min-w-0 flex-1 flex-col rounded-xl border border-slate-200 bg-white lg:flex lg:h-[calc(100vh-130px)] ${
+          selecionadoId ? 'flex h-[calc(100vh-104px)]' : 'hidden lg:flex'
+        }`}
       >
         {!selecionado ? (
-          <div className="flex flex-1 items-center justify-center text-slate-400">
+          <div className="flex flex-1 items-center justify-center p-6 text-center text-slate-400">
             Selecione um atendimento a esquerda
           </div>
         ) : (
           <>
-            <header className="flex flex-wrap items-center gap-3 border-b border-slate-200 p-3">
+            <header className="flex flex-wrap items-center gap-2 border-b border-slate-200 p-3">
+              {/* Voltar: so no celular, onde a lista some */}
+              <button
+                onClick={() => setSelecionadoId(null)}
+                aria-label="Voltar para a lista"
+                className="rounded-lg px-2 py-1 text-slate-500 hover:bg-slate-100 lg:hidden"
+              >
+                ←
+              </button>
+
               <div className="min-w-0 flex-1">
                 <p className="truncate font-semibold">
                   {selecionado.contato_nome || formatarTelefone(selecionado.contato_numero)}
@@ -290,23 +344,25 @@ export default function Inbox({ perfil }: { perfil: Perfil }) {
                 </p>
               </div>
 
-              {!selecionado.usuario_id ? (
+              {!encerrado && !selecionado.usuario_id && (
                 <button
                   onClick={() => assumir(selecionado.id)}
                   className="rounded-lg bg-[var(--color-zap)] px-3 py-1.5 text-sm font-medium text-white hover:brightness-110"
                 >
                   Assumir
                 </button>
-              ) : selecionado.usuario_id === perfil.id ? (
+              )}
+
+              {!encerrado && selecionado.usuario_id === perfil.id && (
                 <button
                   onClick={() => liberar(selecionado.id)}
                   className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm hover:bg-slate-50"
                 >
                   Liberar
                 </button>
-              ) : null}
+              )}
 
-              {!['encerrado', 'resolvido'].includes(selecionado.status) && (
+              {!encerrado && (
                 <button
                   onClick={() => setModalEncerrar(true)}
                   className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm hover:bg-slate-50"
@@ -314,9 +370,21 @@ export default function Inbox({ perfil }: { perfil: Perfil }) {
                   Encerrar
                 </button>
               )}
+
+              {/* Excluir so em atendimento encerrado: apagar um chamado vivo
+                  seria perder conversa em andamento sem querer. */}
+              {encerrado && (
+                <button
+                  onClick={excluir}
+                  disabled={excluindo}
+                  className="rounded-lg border border-red-200 px-3 py-1.5 text-sm text-red-600 hover:bg-red-50 disabled:opacity-50"
+                >
+                  {excluindo ? 'Excluindo...' : 'Excluir'}
+                </button>
+              )}
             </header>
 
-            <div className="flex-1 space-y-2 overflow-y-auto bg-slate-50 p-4">
+            <div className="flex-1 space-y-2 overflow-y-auto bg-slate-50 p-3 sm:p-4">
               {mensagens.map((m) => {
                 const recebida = m.direcao === 'recebida'
                 const imagem = (m.raw as { image?: { imageUrl?: string } } | null)?.image?.imageUrl
@@ -324,7 +392,7 @@ export default function Inbox({ perfil }: { perfil: Perfil }) {
                 return (
                   <div key={m.id} className={`flex ${recebida ? 'justify-start' : 'justify-end'}`}>
                     <div
-                      className={`max-w-[75%] rounded-2xl px-3 py-2 shadow-sm ${
+                      className={`max-w-[85%] rounded-2xl px-3 py-2 shadow-sm sm:max-w-[75%] ${
                         recebida ? 'bg-white' : 'bg-[var(--color-zap-bolha)]'
                       }`}
                     >
@@ -370,34 +438,44 @@ export default function Inbox({ perfil }: { perfil: Perfil }) {
                 <p className="mb-2 rounded-lg bg-red-50 p-2 text-sm text-red-700">{erroEnvio}</p>
               )}
 
-              <div className="flex items-end gap-2">
-                <textarea
-                  value={rascunho}
-                  onChange={(e) => setRascunho(e.target.value)}
-                  onKeyDown={(e) => {
-                    // Enter envia, Shift+Enter quebra linha.
-                    if (e.key === 'Enter' && !e.shiftKey) {
-                      e.preventDefault()
-                      void enviar()
-                    }
-                  }}
-                  rows={1}
-                  placeholder="Escreva sua resposta... (Enter envia, Shift+Enter quebra linha)"
-                  className="max-h-40 flex-1 resize-y rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-[var(--color-zap)]"
-                />
-                <button
-                  onClick={enviar}
-                  disabled={enviando || !rascunho.trim()}
-                  className="rounded-lg bg-[var(--color-zap)] px-4 py-2 text-sm font-medium text-white hover:brightness-110 disabled:opacity-50"
-                >
-                  {enviando ? '...' : 'Enviar'}
-                </button>
-              </div>
-
-              {selecionado.origem === 'grupo' && (
-                <p className="mt-1.5 text-xs text-slate-400">
-                  A resposta vai para o grupo, mencionando quem abriu o chamado.
+              {encerrado ? (
+                <p className="text-center text-sm text-slate-400">
+                  Atendimento encerrado. Uma nova mensagem do contato abre um chamado novo.
                 </p>
+              ) : (
+                <>
+                  <div className="flex items-end gap-2">
+                    <textarea
+                      value={rascunho}
+                      onChange={(e) => setRascunho(e.target.value)}
+                      onKeyDown={(e) => {
+                        // Enter envia no desktop. No celular o Enter do teclado
+                        // virtual deve quebrar linha, senao manda sem querer.
+                        const noCelular = window.matchMedia('(max-width: 1023px)').matches
+                        if (e.key === 'Enter' && !e.shiftKey && !noCelular) {
+                          e.preventDefault()
+                          void enviar()
+                        }
+                      }}
+                      rows={1}
+                      placeholder="Escreva sua resposta..."
+                      className="max-h-40 flex-1 resize-y rounded-lg border border-slate-300 px-3 py-2 text-base outline-none focus:border-[var(--color-zap)] sm:text-sm"
+                    />
+                    <button
+                      onClick={enviar}
+                      disabled={enviando || !rascunho.trim()}
+                      className="rounded-lg bg-[var(--color-zap)] px-4 py-2 text-sm font-medium text-white hover:brightness-110 disabled:opacity-50"
+                    >
+                      {enviando ? '...' : 'Enviar'}
+                    </button>
+                  </div>
+
+                  {selecionado.origem === 'grupo' && (
+                    <p className="mt-1.5 text-xs text-slate-400">
+                      A resposta vai para o grupo, mencionando quem abriu o chamado.
+                    </p>
+                  )}
+                </>
               )}
             </div>
           </>
@@ -422,8 +500,8 @@ function ModalEncerrar({
   const [solucao, setSolucao] = useState('')
 
   return (
-    <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 p-4">
-      <div className="w-full max-w-lg space-y-4 rounded-xl bg-white p-6 shadow-xl">
+    <div className="fixed inset-0 z-40 flex items-end justify-center bg-black/40 p-3 sm:items-center sm:p-4">
+      <div className="max-h-[90vh] w-full max-w-lg space-y-4 overflow-y-auto rounded-xl bg-white p-5 shadow-xl sm:p-6">
         <div>
           <h2 className="text-lg font-semibold">Encerrar atendimento</h2>
           <p className="text-sm text-slate-500">
@@ -438,7 +516,7 @@ function ModalEncerrar({
             value={problema}
             onChange={(e) => setProblema(e.target.value)}
             rows={2}
-            className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-[var(--color-zap)]"
+            className="w-full rounded-lg border border-slate-300 px-3 py-2 text-base outline-none focus:border-[var(--color-zap)] sm:text-sm"
           />
         </label>
 
@@ -448,7 +526,7 @@ function ModalEncerrar({
             value={solucao}
             onChange={(e) => setSolucao(e.target.value)}
             rows={3}
-            className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-[var(--color-zap)]"
+            className="w-full rounded-lg border border-slate-300 px-3 py-2 text-base outline-none focus:border-[var(--color-zap)] sm:text-sm"
           />
         </label>
 

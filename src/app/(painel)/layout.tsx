@@ -8,6 +8,7 @@ import { redirect } from 'next/navigation'
 import { usuarioAtual } from '@/lib/supabase/server'
 import Nav from '@/components/Nav'
 import AlarmeEscalonamento from '@/components/AlarmeEscalonamento'
+import InstalarApp from '@/components/InstalarApp'
 
 export default async function LayoutPainel({ children }: { children: React.ReactNode }) {
   const sessao = await usuarioAtual()
@@ -20,6 +21,7 @@ export default async function LayoutPainel({ children }: { children: React.React
       <AlarmeEscalonamento />
       <Nav nome={nome} />
       {children}
+      <InstalarApp />
     </>
   )
 }
