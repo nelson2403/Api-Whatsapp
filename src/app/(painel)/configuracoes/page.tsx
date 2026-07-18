@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { criarClienteNavegador } from '@/lib/supabase/client'
 import { formatarTelefone } from '@/lib/whatsapp/telefone'
+import ImportarGrupos from '@/components/ImportarGrupos'
 import type { Config, Grupo } from '@/lib/tipos'
 
 const DIAS = [
@@ -85,6 +86,34 @@ export default function PaginaConfiguracoes() {
     } else {
       mostrarAviso('Salvo.')
     }
+  }
+
+  async function removerGrupo(grupo: Grupo) {
+    // Os atendimentos ficam (grupo_id vira null pela FK), mas o historico de
+    // mensagens do grupo e apagado em cascata. Vale avisar antes.
+    if (
+      !confirm(
+        `Remover "${grupo.nome}" da lista?\n\n` +
+          'O historico de mensagens deste grupo sera apagado. ' +
+          'Se voce so quer parar de atender por enquanto, use o interruptor em vez de remover.',
+      )
+    ) {
+      return
+    }
+
+    const { error } = await supabase.from('whatsapp_grupos').delete().eq('id', grupo.id)
+
+    if (error) {
+      mostrarAviso(
+        error.message.includes('row-level security')
+          ? 'Somente administradores podem remover grupos.'
+          : error.message,
+      )
+      return
+    }
+
+    mostrarAviso('Grupo removido.')
+    void carregar()
   }
 
   async function adicionarIgnorado(evento: React.FormEvent) {
@@ -230,14 +259,15 @@ export default function PaginaConfiguracoes() {
       <section className="space-y-4 rounded-xl border border-slate-200 bg-white p-5">
         <h2 className="font-medium">Grupos de suporte</h2>
         <p className="text-sm text-slate-500">
-          Grupos aparecem aqui sozinhos assim que recebem a primeira mensagem, ja desativados.
-          Ative o que voce quer que seja atendido.
+          Busque os grupos da sua conta e escolha quais atender. Grupos novos tambem aparecem
+          sozinhos assim que recebem a primeira mensagem, sempre desativados.
         </p>
+
+        <ImportarGrupos aoImportar={carregar} />
 
         {grupos.length === 0 && (
           <p className="rounded-lg bg-slate-50 p-4 text-sm text-slate-500">
-            Nenhum grupo detectado ainda. Adicione o numero do WhatsApp aos grupos de suporte e
-            mande qualquer mensagem neles -- em segundos aparecem aqui.
+            Nenhum grupo na lista ainda. Clique em <strong>Buscar meus grupos</strong> acima.
           </p>
         )}
 
@@ -248,6 +278,13 @@ export default function PaginaConfiguracoes() {
                 <p className="truncate font-medium">{grupo.nome}</p>
                 <p className="truncate font-mono text-xs text-slate-400">{grupo.grupo_id}</p>
               </div>
+              <button
+                onClick={() => removerGrupo(grupo)}
+                title="Remover da lista"
+                className="shrink-0 rounded-lg border border-slate-300 px-2 py-1 text-xs text-slate-500 hover:border-red-300 hover:bg-red-50 hover:text-red-600"
+              >
+                Remover
+              </button>
               <Interruptor
                 ligado={grupo.ativo}
                 aoAlternar={(v) => salvarGrupo(grupo.id, { ativo: v })}

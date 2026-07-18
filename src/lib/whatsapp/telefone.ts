@@ -31,10 +31,11 @@ export function telefonesBatem(a: string, b: string): boolean {
   return false
 }
 
-/** O Z-API identifica grupos com o sufixo `-group` no campo `phone`. */
-export function ehIdGrupo(phone: string | null | undefined): boolean {
-  return typeof phone === 'string' && phone.includes('-group')
-}
+// Nao existe helper para "isso e um grupo?" de proposito. O ID de grupo tem
+// dois formatos no WhatsApp -- o atual (120363...-group) e o legado
+// (5528999861328-1608308507, sem sufixo) -- entao deduzir pelo texto do ID
+// erra em grupos antigos. Use sempre o campo `isGroup` do payload do Z-API,
+// que e autoritativo.
 
 /** Formata para exibicao: 5527999998888 -> (27) 99999-8888 */
 export function formatarTelefone(valor: string | null | undefined): string {
