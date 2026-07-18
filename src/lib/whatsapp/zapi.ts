@@ -153,10 +153,15 @@ export async function statusInstancia(): Promise<StatusInstancia> {
       return { conectado: false, sessaoIniciada: false, erro: json.error ?? `Erro HTTP ${resposta.status}` }
     }
 
+    const conectado = json.connected === true
+
     return {
-      conectado: json.connected === true,
+      conectado,
       sessaoIniciada: json.smartphoneConnected === true,
-      erro: json.error ?? null,
+      // O Z-API preenche `error` mesmo quando deu tudo certo -- responde
+      // "You are already connected." num 200 com connected:true. Repassar
+      // isso faria o painel mostrar erro numa conexao saudavel.
+      erro: conectado ? null : (json.error ?? null),
     }
   } catch (e) {
     return {
