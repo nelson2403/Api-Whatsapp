@@ -16,9 +16,28 @@ export const maxDuration = 60
 export const dynamic = 'force-dynamic'
 
 function segredoConfere(recebido: string): boolean {
-  const esperado = process.env.ZAPI_WEBHOOK_SECRET
-  if (!esperado) return false
-  if (recebido.length !== esperado.length) return false
+  // trim(): colar o valor no painel da Vercel costuma trazer um espaco ou
+  // uma quebra de linha junto. O segredo passa a nao bater e a rota devolve
+  // 404 identico ao de segredo errado -- indistinguivel de "configurei
+  // errado", e caro de diagnosticar.
+  const esperado = process.env.ZAPI_WEBHOOK_SECRET?.trim()
+
+  if (!esperado) {
+    console.error(
+      '[webhook] ZAPI_WEBHOOK_SECRET nao esta definida no servidor. ' +
+        'Toda chamada vai responder 404 ate ela ser configurada na Vercel (e redeploy).',
+    )
+    return false
+  }
+
+  if (recebido.length !== esperado.length) {
+    console.error(
+      `[webhook] segredo com tamanho diferente do esperado ` +
+        `(recebido ${recebido.length}, configurado ${esperado.length}). ` +
+        'Confira se o valor na Vercel e o mesmo que esta na URL do Z-API.',
+    )
+    return false
+  }
 
   // Comparacao de tempo constante. Exagero? Talvez. Mas custa 3 linhas e
   // fecha a porta para descobrir o segredo medindo tempo de resposta.
