@@ -14,6 +14,12 @@ const LINKS = [
 interface StatusResposta {
   zapi: { conectado: boolean; sessaoIniciada: boolean; erro: string | null }
   ia: boolean
+  diagnosticoIA?: {
+    configurada: boolean
+    alcancavel: boolean
+    latenciaMs: number | null
+    erro: string | null
+  }
 }
 
 export default function Nav({ nome }: { nome: string }) {
@@ -102,10 +108,18 @@ export default function Nav({ nome }: { nome: string }) {
 
           {status && !status.ia && (
             <span
-              title="GROQ_API_KEY ausente: todo chamado vai direto para atendente humano"
-              className="rounded-full bg-amber-100 px-2.5 py-1 text-xs font-medium text-amber-700"
+              // O motivo exato vem do servidor. Mostrar "IA desligada" sem
+              // dizer por que ja custou tempo de diagnostico neste projeto.
+              title={
+                status.diagnosticoIA?.erro ??
+                'IA indisponivel: todo chamado vai direto para atendente humano'
+              }
+              className="cursor-help rounded-full bg-amber-100 px-2 py-1 text-xs font-medium text-amber-700 sm:px-2.5"
             >
-              IA desligada
+              <span className="lg:hidden">IA ⚠</span>
+              <span className="hidden lg:inline">
+                {status.diagnosticoIA?.configurada === false ? 'IA sem chave' : 'IA indisponivel'}
+              </span>
             </span>
           )}
 

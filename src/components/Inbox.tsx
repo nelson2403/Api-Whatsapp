@@ -338,7 +338,14 @@ export default function Inbox({ perfil }: { perfil: Perfil }) {
                   {selecionado.contato_nome || formatarTelefone(selecionado.contato_numero)}
                 </p>
                 <p className="truncate text-xs text-slate-500">
-                  {selecionado.grupo ? `${selecionado.grupo.nome} · ` : 'Privado · '}
+                  {/* Nao deduza a origem pela presenca do grupo: um grupo
+                      removido da lista deixa o chamado com grupo null, e
+                      exibir "Privado" ali seria mentira. */}
+                  {selecionado.grupo
+                    ? `${selecionado.grupo.nome} · `
+                    : selecionado.origem === 'grupo'
+                      ? 'Grupo removido · '
+                      : 'Privado · '}
                   {formatarTelefone(selecionado.contato_numero)}
                   {selecionado.motivo_escalonamento && ` · ${selecionado.motivo_escalonamento}`}
                 </p>
