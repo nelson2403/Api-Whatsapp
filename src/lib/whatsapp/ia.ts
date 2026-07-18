@@ -242,14 +242,57 @@ ou o problema parece mais grave do que os casos cobrem:
 - "texto": null
 - "motivo": uma frase curta explicando por que escalou
 
-Como escrever "texto":
-- Comece com uma frase curta reconhecendo o problema.
-- Depois os passos, numerados, na ordem exata do caso. Nao pule nem reordene.
-- Um passo por linha. Frases curtas, linguagem simples, sem jargao.
-- Termine pedindo que a pessoa avise se funcionou ou nao.
-- Use *asterisco simples* para negrito (formato do WhatsApp), nunca **duplo**.
-- Maximo de 900 caracteres. Sem markdown de titulo, sem bullet com hifen.
-- Nao mencione "caso", "base de conhecimento" nem nada interno do sistema.`
+Como escrever "texto" -- siga a estrutura exatamente:
+
+1) Uma frase curta reconhecendo o problema. Ela NAO pode repetir o conteudo do
+   primeiro passo: e so uma abertura ("Vamos resolver isso!", "Entendi o que
+   esta acontecendo.").
+2) Linha em branco.
+3) Os passos, numerados, na ordem exata do caso. Nao pule, nao reordene, nao
+   junte dois passos numa linha.
+4) Linha em branco.
+5) Um pedido curto para a pessoa avisar se funcionou ou nao.
+
+Regras de formatacao, todas obrigatorias:
+- Cada passo numerado fica na PROPRIA LINHA. Use quebras de linha de verdade
+  dentro da string JSON. Nunca escreva os passos seguidos no mesmo paragrafo.
+- Reescreva cada passo em frase curta e natural, mas sem mudar o que ele manda
+  fazer nem a ordem.
+- Se o cliente ja disse que tentou algo, pule esse passo em vez de repeti-lo.
+- Negrito do WhatsApp e *asterisco simples*, nunca **duplo**.
+- Sem titulo, sem bullet com hifen, sem markdown alem do negrito.
+- Maximo de 900 caracteres.
+- Nao mencione "caso", "base de conhecimento" nem nada interno do sistema.
+
+Assim a mensagem deve CHEGAR no celular do cliente:
+
+  Entendi, vamos verificar isso.
+
+  1. Confira se a luz da impressora esta acesa
+  2. Verifique o cabo USB nas duas pontas
+  3. Desligue a impressora, espere 10 segundos e ligue de novo
+
+  Me avisa se funcionou!`
+
+/**
+ * Conserta quebras de linha antes do texto sair para o WhatsApp.
+ *
+ * O modelo as vezes escreve a sequencia literal barra-n dentro da string JSON
+ * em vez de uma quebra real. Isso passa pelo JSON.parse sem erro e chega no
+ * celular do cliente como "\\n" visivel no meio da mensagem, transformando o
+ * passo-a-passo num paragrafo unico ilegivel.
+ *
+ * Tratar aqui e mais confiavel do que insistir no prompt: nao depende de o
+ * modelo obedecer.
+ */
+function normalizarQuebras(texto: string): string {
+  return texto
+    .replace(/\\r\\n|\\n|\\r/g, '\n') // sequencias literais viram quebra real
+    .replace(/\r\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n') // no maximo uma linha em branco seguida
+    .replace(/[ \t]+$/gm, '') // espaco sobrando no fim das linhas
+    .trim()
+}
 
 export interface OpcoesDiagnostico {
   /** Problema relatado pelo cliente. */
@@ -379,7 +422,7 @@ export async function diagnosticar(opcoes: OpcoesDiagnostico): Promise<Diagnosti
       return escalar(bruto.motivo || 'A IA nao encontrou caso correspondente na base')
     }
 
-    const texto = typeof bruto.texto === 'string' ? bruto.texto.trim() : ''
+    const texto = normalizarQuebras(typeof bruto.texto === 'string' ? bruto.texto : '')
     if (!texto) return escalar('A IA nao produziu resposta utilizavel')
 
     // O caso citado tem que existir de verdade entre os candidatos. Se o
