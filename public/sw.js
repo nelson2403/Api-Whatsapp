@@ -12,7 +12,9 @@
 //
 // O handler de fetch tambem e o que torna o app instalavel.
 
-const CACHE = 'suporte-estatico-v1'
+// Mudar este nome descarta todo o cache anterior na ativacao. Use quando
+// desconfiar que alguem ficou preso numa versao antiga.
+const CACHE = 'suporte-estatico-v2'
 
 self.addEventListener('install', (evento) => {
   // Assume o controle sem esperar as abas antigas fecharem.

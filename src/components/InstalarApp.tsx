@@ -20,11 +20,46 @@ export default function InstalarApp() {
   const [evento, setEvento] = useState<EventoInstalacao | null>(null)
   const [mostrarIOS, setMostrarIOS] = useState(false)
 
+  // Registro do service worker + recarga automatica quando sai versao nova.
+  //
+  // Sem isto, uma aba aberta continua rodando a versao antiga ate a pessoa
+  // dar refresh forcado -- e ninguem sabe que precisa. Neste projeto isso ja
+  // custou varias rodadas de "nao funcionou" que na verdade eram "nao
+  // atualizou", que sao problemas completamente diferentes.
+  //
+  // Como funciona: o sw.js chama skipWaiting() ao instalar, entao a versao
+  // nova assume o controle assim que baixa. Quando isso acontece o navegador
+  // dispara `controllerchange`, e a pagina se recarrega sozinha.
   useEffect(() => {
     if (!('serviceWorker' in navigator)) return
-    navigator.serviceWorker.register('/sw.js').catch((e) => {
-      console.error('[pwa] falha ao registrar o service worker:', e)
-    })
+
+    let intervalo: ReturnType<typeof setInterval> | null = null
+
+    navigator.serviceWorker
+      .register('/sw.js')
+      .then((registro) => {
+        // Procura versao nova de tempos em tempos. Sem isso a checagem so
+        // aconteceria ao abrir a aba, e um painel de atendimento fica aberto
+        // o dia inteiro.
+        intervalo = setInterval(() => void registro.update().catch(() => {}), 5 * 60_000)
+      })
+      .catch((e) => console.error('[pwa] falha ao registrar o service worker:', e))
+
+    let recarregando = false
+    const aoTrocarControlador = () => {
+      // Guarda contra laco de recarga: sem ela, um erro na ativacao poderia
+      // deixar a pagina recarregando sem parar.
+      if (recarregando) return
+      recarregando = true
+      window.location.reload()
+    }
+
+    navigator.serviceWorker.addEventListener('controllerchange', aoTrocarControlador)
+
+    return () => {
+      if (intervalo) clearInterval(intervalo)
+      navigator.serviceWorker.removeEventListener('controllerchange', aoTrocarControlador)
+    }
   }, [])
 
   useEffect(() => {
