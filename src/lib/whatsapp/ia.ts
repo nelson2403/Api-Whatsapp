@@ -18,23 +18,100 @@
 // O segundo pior e ficar sem resposta e sem ninguem avisado. Escalar resolve
 // os dois.
 
-import Groq from 'groq-sdk'
 import type { CasoConhecimento } from '@/lib/tipos'
 
 const MODELO_RESPOSTA = process.env.GROQ_MODEL_RESPOSTA || 'llama-3.3-70b-versatile'
 const MODELO_CLASSIFICACAO = process.env.GROQ_MODEL_CLASSIFICACAO || 'llama-3.1-8b-instant'
 const MODELO_VISAO = process.env.GROQ_MODEL_VISAO || 'meta-llama/llama-4-scout-17b-16e-instruct'
 
-let cliente: Groq | null = null
-
-function obterCliente(): Groq | null {
-  if (!process.env.GROQ_API_KEY) return null
-  if (!cliente) cliente = new Groq({ apiKey: process.env.GROQ_API_KEY })
-  return cliente
-}
+const ENDPOINT = 'https://api.groq.com/openai/v1/chat/completions'
 
 export function iaDisponivel(): boolean {
   return Boolean(process.env.GROQ_API_KEY)
+}
+
+type ConteudoMensagem =
+  | string
+  | Array<
+      | { type: 'text'; text: string }
+      | { type: 'image_url'; image_url: { url: string } }
+    >
+
+interface CorpoGroq {
+  model: string
+  temperature: number
+  max_tokens: number
+  response_format: { type: 'json_object' }
+  messages: { role: 'system' | 'user'; content: ConteudoMensagem }[]
+}
+
+/**
+ * Chama a Groq via fetch, sem SDK.
+ *
+ * O SDK era uma camada a mais que embrulhava toda falha de rede num
+ * "Connection error." sem nome, sem status e sem corpo -- em producao isso
+ * significou um chamado escalado sem que houvesse como saber se era chave
+ * invalida, limite estourado, modelo inexistente ou timeout. Com fetch, o
+ * erro que chega no log e o erro que aconteceu.
+ *
+ * Uma tentativa extra cobre a falha transitoria, que e o caso comum.
+ */
+async function chamarGroq(corpo: CorpoGroq, timeoutMs: number): Promise<string> {
+  const chave = process.env.GROQ_API_KEY
+  if (!chave) throw new Error('GROQ_API_KEY ausente')
+
+  let ultimoErro = ''
+
+  for (let tentativa = 1; tentativa <= 2; tentativa++) {
+    try {
+      const resposta = await fetch(ENDPOINT, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${chave}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(corpo),
+        signal: AbortSignal.timeout(timeoutMs),
+      })
+
+      if (!resposta.ok) {
+        const detalhe = (await resposta.json().catch(() => ({}))) as {
+          error?: { message?: string; code?: string }
+        }
+        const mensagem = detalhe.error?.message ?? `HTTP ${resposta.status}`
+
+        // 4xx nao melhora repetindo: chave errada continua errada. So 429
+        // (limite) e 5xx valem nova tentativa.
+        if (resposta.status < 500 && resposta.status !== 429) {
+          throw new Error(`Groq recusou (${resposta.status}): ${mensagem}`)
+        }
+
+        ultimoErro = `Groq indisponivel (${resposta.status}): ${mensagem}`
+        continue
+      }
+
+      const json = (await resposta.json()) as {
+        choices?: { message?: { content?: string } }[]
+      }
+
+      const conteudo = json.choices?.[0]?.message?.content
+      if (!conteudo) throw new Error('Groq respondeu sem conteudo')
+
+      return conteudo
+    } catch (e) {
+      const erro = e instanceof Error ? e : new Error(String(e))
+
+      // Erro de recusa ja e definitivo -- nao repete.
+      if (erro.message.startsWith('Groq recusou')) throw erro
+
+      ultimoErro =
+        erro.name === 'TimeoutError' || erro.name === 'AbortError'
+          ? `Tempo esgotado apos ${timeoutMs}ms`
+          : `${erro.name}: ${erro.message}`
+    }
+  }
+
+  throw new Error(ultimoErro || 'Falha desconhecida ao chamar a Groq')
 }
 
 // ---------------------------------------------------------------------------
@@ -90,8 +167,7 @@ export async function classificar(opcoes: OpcoesClassificacao): Promise<Classifi
   const { texto, temChamadoAberto, ultimaResposta } = opcoes
 
   // Sem IA: trata tudo como solicitacao. Prefere ruido a perder chamado.
-  const groq = obterCliente()
-  if (!groq || !texto?.trim()) {
+  if (!iaDisponivel() || !texto?.trim()) {
     return { tipo: 'solicitacao', urgencia: 'normal', resumo: texto?.slice(0, 80) ?? '' }
   }
 
@@ -102,7 +178,7 @@ export async function classificar(opcoes: OpcoesClassificacao): Promise<Classifi
     : '\n\nContexto: esta pessoa nao tem chamado em andamento.'
 
   try {
-    const resposta = await groq.chat.completions.create(
+    const conteudo = await chamarGroq(
       {
         model: MODELO_CLASSIFICACAO,
         temperature: 0,
@@ -113,10 +189,10 @@ export async function classificar(opcoes: OpcoesClassificacao): Promise<Classifi
           { role: 'user', content: texto.slice(0, 1500) },
         ],
       },
-      { timeout: 12_000 },
+      12_000,
     )
 
-    const bruto = JSON.parse(resposta.choices[0]?.message?.content || '{}') as Partial<Classificacao>
+    const bruto = JSON.parse(conteudo || '{}') as Partial<Classificacao>
 
     const tiposValidos: TipoMensagemClassificada[] = [
       'solicitacao', 'conversa', 'resolvido', 'nao_resolvido', 'pedido_humano',
@@ -131,8 +207,11 @@ export async function classificar(opcoes: OpcoesClassificacao): Promise<Classifi
         : 'normal',
       resumo: typeof bruto.resumo === 'string' ? bruto.resumo.slice(0, 120) : '',
     }
-  } catch {
-    // Classificador fora do ar nao pode engolir chamado.
+  } catch (e) {
+    // Classificador fora do ar nao pode engolir chamado. Mas o erro precisa
+    // aparecer no log: silenciar aqui foi o que escondeu uma indisponibilidade
+    // inteira da Groq atras de um comportamento aparentemente normal.
+    console.error('[ia] classificacao falhou:', e instanceof Error ? e.message : e)
     return { tipo: 'solicitacao', urgencia: 'normal', resumo: texto.slice(0, 80) }
   }
 }
@@ -325,8 +404,7 @@ export async function diagnosticar(opcoes: OpcoesDiagnostico): Promise<Diagnosti
   })
 
   // --- Travas duras --------------------------------------------------------
-  const groq = obterCliente()
-  if (!groq) return escalar('IA nao configurada (GROQ_API_KEY ausente)')
+  if (!iaDisponivel()) return escalar('IA nao configurada (GROQ_API_KEY ausente)')
   if (!casos.length) return escalar('Nenhum caso cadastrado na base de conhecimento')
   if (!problema?.trim()) return escalar('Mensagem sem texto para diagnosticar')
 
@@ -424,7 +502,7 @@ export async function diagnosticar(opcoes: OpcoesDiagnostico): Promise<Diagnosti
     : `Problema relatado: ${problema}`
 
   try {
-    const resposta = await groq.chat.completions.create(
+    const conteudo = await chamarGroq(
       {
         model: usarVisao ? MODELO_VISAO : MODELO_RESPOSTA,
         temperature: 0.2,
@@ -432,14 +510,14 @@ export async function diagnosticar(opcoes: OpcoesDiagnostico): Promise<Diagnosti
         response_format: { type: 'json_object' },
         messages: [
           { role: 'system', content: `${PROMPT_DIAGNOSTICO}\n\n${blocos.join('\n\n')}` },
-          // O SDK aceita string ou array de partes; o cast cobre os dois.
-          { role: 'user', content: conteudoUsuario as unknown as string },
+          { role: 'user', content: conteudoUsuario },
         ],
       },
-      { timeout: 25_000 },
+      // Visao demora mais: o modelo ainda baixa cada imagem antes de comecar.
+      usarVisao ? 40_000 : 25_000,
     )
 
-    const bruto = JSON.parse(resposta.choices[0]?.message?.content || '{}') as {
+    const bruto = JSON.parse(conteudo || '{}') as {
       caso_id?: string
       texto?: string | null
       escalar?: boolean
@@ -472,6 +550,8 @@ export async function diagnosticar(opcoes: OpcoesDiagnostico): Promise<Diagnosti
         : 'media',
     }
   } catch (e) {
-    return escalar(e instanceof Error ? `Falha na IA: ${e.message}` : 'Falha desconhecida na IA')
+    const mensagem = e instanceof Error ? e.message : String(e)
+    console.error('[ia] diagnostico falhou:', mensagem)
+    return escalar(`Falha na IA: ${mensagem}`)
   }
 }

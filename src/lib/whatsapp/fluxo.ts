@@ -392,12 +392,74 @@ interface Contexto {
 // Passo 15/16 -- diagnostico
 // ---------------------------------------------------------------------------
 
+/** Quanto tempo duas mensagens ainda contam como o mesmo relato. */
+const JANELA_PAREAMENTO_MS = 5 * 60_000
+
+/**
+ * Junta a foto e a explicacao quando vieram em mensagens separadas.
+ *
+ * Duas situacoes, uma o espelho da outra:
+ *
+ *   - Chegou texto agora, e havia uma foto sem legenda ha pouco. A foto vira
+ *     a imagem do diagnostico ("meu caixa nao abre" + o print do erro).
+ *   - Chegou foto sem legenda agora, e havia texto ha pouco. O texto vira a
+ *     descricao do problema, em vez do inutil "[imagem enviada]".
+ */
+async function juntarFotoEExplicacao(
+  contexto: Contexto,
+): Promise<{ texto: string; imagemUrl: string | null }> {
+  const { atendimento, texto, imagemUrl, tipo } = contexto
+  const supabase = criarClienteAdmin()
+
+  const desde = new Date(Date.now() - JANELA_PAREAMENTO_MS).toISOString()
+
+  // Texto agora, procura foto recente.
+  if (tipo === 'texto' && !imagemUrl) {
+    const { data } = await supabase
+      .from('whatsapp_mensagens')
+      .select('midia_url, conteudo')
+      .eq('atendimento_id', atendimento.id)
+      .eq('direcao', 'recebida')
+      .eq('tipo', 'imagem')
+      .gte('created_at', desde)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle()
+
+    const foto = (data as { midia_url?: string | null } | null)?.midia_url
+    if (foto) return { texto, imagemUrl: foto }
+  }
+
+  // Foto sem legenda agora, procura o texto que a explica.
+  if (tipo === 'imagem' && texto === '[imagem enviada]') {
+    const { data } = await supabase
+      .from('whatsapp_mensagens')
+      .select('conteudo')
+      .eq('atendimento_id', atendimento.id)
+      .eq('direcao', 'recebida')
+      .eq('tipo', 'texto')
+      .gte('created_at', desde)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle()
+
+    const explicacao = (data as { conteudo?: string | null } | null)?.conteudo
+    if (explicacao?.trim()) {
+      return { texto: `${explicacao} (com a imagem em anexo)`, imagemUrl }
+    }
+  }
+
+  return { texto, imagemUrl }
+}
+
 async function diagnosticarEResponder(
   contexto: Contexto,
   urgencia: 'baixa' | 'normal' | 'alta',
 ): Promise<ResultadoProcessamento> {
   const supabase = criarClienteAdmin()
-  const { atendimento, grupo, texto, imagemUrl, nomeContato } = contexto
+  // `texto` e `imagemUrl` finais saem de juntarFotoEExplicacao mais abaixo --
+  // podem vir de mensagens anteriores, nao so desta.
+  const { atendimento, grupo, nomeContato } = contexto
 
   const [casosResposta, aprendidosResposta, historicoResposta] = await Promise.all([
     supabase.from('whatsapp_base_conhecimento').select('*').eq('ativo', true),
@@ -420,7 +482,15 @@ async function diagnosticarEResponder(
     return await escalar(contexto, 'Base de conhecimento vazia -- nenhum caso cadastrado', urgencia)
   }
 
-  const candidatos = preFiltrarCasos(texto, casos)
+  // Junta foto e explicacao que vieram separadas.
+  //
+  // Ninguem manda print com legenda: manda a foto e, logo em seguida, "meu
+  // caixa nao abre". Tratadas isoladamente, a foto e diagnosticada sem
+  // contexto nenhum e o texto sem a imagem que o explica -- as duas metades
+  // do problema, nenhuma suficiente.
+  const { texto: problema, imagemUrl } = await juntarFotoEExplicacao(contexto)
+
+  const candidatos = preFiltrarCasos(problema, casos)
 
   const historico = ((historicoResposta.data ?? []) as unknown as Array<{
     direcao: 'recebida' | 'enviada'
@@ -431,7 +501,7 @@ async function diagnosticarEResponder(
     .map((m) => ({ direcao: m.direcao, conteudo: m.conteudo as string }))
 
   const diagnostico = await diagnosticar({
-    problema: texto,
+    problema,
     casos: candidatos,
     historico,
     aprendidos: (aprendidosResposta.data ?? []) as unknown as { problema: string; solucao: string }[],
@@ -522,7 +592,16 @@ async function escalar(
   const agora = new Date()
   const noHorario = grupo ? dentroDoHorario(grupo, agora) : true
 
-  await supabase
+  // A condicao `ia_escalado = false` faz do UPDATE a trava da corrida.
+  //
+  // Cliente que manda foto e texto no mesmo segundo gera dois webhooks em
+  // paralelo. Ambos liam ia_escalado=false antes de qualquer um gravar, e
+  // ambos escalavam -- o cliente recebia a mesma mensagem duas vezes e dois
+  // alertas disparavam. Checar em JavaScript nao resolve: entre a leitura e a
+  // escrita cabe o outro processo inteiro.
+  //
+  // Aqui quem perde a corrida nao atualiza linha nenhuma, e desiste.
+  const { data: escalou } = await supabase
     .from('whatsapp_atendimentos')
     .update({
       ia_escalado: true,
@@ -536,6 +615,16 @@ async function escalar(
       ...(atendimento.entrou_na_fila_em ? {} : { entrou_na_fila_em: agora.toISOString() }),
     })
     .eq('id', atendimento.id)
+    .eq('ia_escalado', false)
+    .select('id')
+
+  if (!escalou?.length) {
+    return {
+      acao: 'escalonamento_duplicado',
+      detalhe: 'outro evento ja escalou este chamado',
+      atendimentoId: atendimento.id,
+    }
+  }
 
   // Avisa o cliente. Fora do horario, a mensagem diz quando alguem volta.
   const aviso =
