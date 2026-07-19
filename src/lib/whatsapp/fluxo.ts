@@ -16,6 +16,7 @@
 //   08. Classificacao: e chamado ou conversa solta?     -> para se conversa
 //   09. Resolve/cria o chamado e vincula a mensagem
 //   10. Atendente humano ja assumiu                     -> bot cala a boca
+//   10b. Trava de resposta (uma resposta por vez)      -> para se outro ganhou
 //   11. Cliente confirmou que resolveu                  -> fecha o chamado
 //   12. Cliente pediu humano / disse que nao resolveu   -> escala
 //   13. Chamado ja escalado                             -> bot cala a boca
@@ -38,6 +39,7 @@ import {
   lerImagem,
   combinarRelatoComLeitura,
   type LeituraImagem,
+  type Classificacao,
 } from '@/lib/whatsapp/ia'
 import { dispararAlerta } from '@/lib/whatsapp/alertas'
 import { participaDeGrupoAtivo, sincronizarParticipantes } from '@/lib/whatsapp/participantes'
@@ -322,6 +324,69 @@ export async function processarMensagem(payload: PayloadZAPI): Promise<Resultado
   // --- 10. Humano assumiu --------------------------------------------------
   if (atendimento.usuario_id) {
     return { acao: 'humano_no_comando', atendimentoId: atendimento.id }
+  }
+
+  // --- 10b. Trava de resposta ---------------------------------------------
+  //
+  // Daqui para baixo todo caminho pode falar com o cliente -- confirmar
+  // resolucao, escalar ou diagnosticar. Foto e texto enviados no mesmo
+  // segundo geram dois webhooks simultaneos e, sem exclusao, os dois
+  // respondem: o cliente recebe a mesma orientacao duas vezes, as vezes com
+  // redacao levemente diferente, o que parece suporte confuso.
+  //
+  // O anti-flood mais abaixo nao cobre isso: ele le mensagens ja gravadas, e
+  // nos dois processos a leitura acontece antes de qualquer resposta existir.
+  if (!(await reivindicarResposta(atendimento.id))) {
+    return { acao: 'resposta_em_andamento', atendimentoId: atendimento.id }
+  }
+
+  try {
+    return await responderAoCliente(contexto, classificacao, tipo)
+  } finally {
+    // Libera sempre, inclusive em erro: chamado travado nao recebe a proxima
+    // mensagem. O prazo da trava ja expiraria sozinho, mas 45s de silencio
+    // por causa de uma excecao e tempo demais.
+    await liberarResposta(atendimento.id)
+  }
+}
+
+/**
+ * Passos 11 a 16, sob a trava de resposta.
+ *
+ * Extraido para que o `finally` que libera a trava cubra todos os caminhos de
+ * saida sem repetir a liberacao em cada `return`.
+ */
+async function responderAoCliente(
+  contexto: Contexto,
+  classificacao: Classificacao,
+  tipo: TipoMensagem,
+): Promise<ResultadoProcessamento> {
+  const supabase = criarClienteAdmin()
+  const { grupo, config } = contexto
+  let { atendimento } = contexto
+
+  // Espera curta antes de agir.
+  //
+  // Ninguem manda print com legenda: manda a foto e escreve em seguida. Sem
+  // esta pausa, quem ganhou a trava responde so com a metade que chegou
+  // primeiro -- a foto sem a explicacao, ou o texto sem a foto.
+  await new Promise((r) => setTimeout(r, 2000))
+
+  // Recarrega: a mensagem irma chegou durante a espera, e a situacao pode ter
+  // mudado (alguem assumiu, outro evento escalou).
+  const { data } = await supabase
+    .from('whatsapp_atendimentos')
+    .select('*')
+    .eq('id', atendimento.id)
+    .single()
+
+  if (data) {
+    const recente = data as unknown as Atendimento
+    if (recente.usuario_id) {
+      return { acao: 'humano_assumiu_na_espera', atendimentoId: atendimento.id }
+    }
+    atendimento = recente
+    contexto.atendimento = recente
   }
 
   // --- 11. Cliente confirmou que resolveu ---------------------------------
@@ -1022,6 +1087,52 @@ async function ultimaRespostaDoBot(atendimentoId: string): Promise<string | null
     .maybeSingle()
 
   return ((data as { conteudo?: string } | null)?.conteudo) ?? null
+}
+
+/** Segundos que a trava de resposta vale. */
+const TRAVA_SEGUNDOS = 45
+
+/**
+ * Reserva o direito de responder este chamado.
+ *
+ * A exclusao acontece no proprio UPDATE: a condicao `respondendo_ate` nulo ou
+ * vencido faz o banco decidir quem passa. Quem nao atualizar linha nenhuma
+ * perdeu a corrida e deve desistir.
+ *
+ * O prazo curto, em vez de um booleano, garante que uma falha no meio do
+ * caminho (timeout da funcao, erro nao tratado) nao deixe o chamado travado
+ * para sempre -- ele se destrava sozinho.
+ */
+async function reivindicarResposta(atendimentoId: string): Promise<boolean> {
+  const supabase = criarClienteAdmin()
+
+  const agora = new Date().toISOString()
+  const ate = new Date(Date.now() + TRAVA_SEGUNDOS * 1000).toISOString()
+
+  const { data, error } = await supabase
+    .from('whatsapp_atendimentos')
+    .update({ respondendo_ate: ate })
+    .eq('id', atendimentoId)
+    .or(`respondendo_ate.is.null,respondendo_ate.lt."${agora}"`)
+    .select('id')
+
+  if (error) {
+    // Coluna ausente (migration 0008 nao aplicada) nao pode travar o
+    // atendimento inteiro: sem a trava volta a duplicar, com o erro para de
+    // responder. Duplicar e o menor dos dois males.
+    console.error('[fluxo] falha ao reivindicar resposta:', error.message)
+    return true
+  }
+
+  return Boolean(data?.length)
+}
+
+async function liberarResposta(atendimentoId: string): Promise<void> {
+  const supabase = criarClienteAdmin()
+  await supabase
+    .from('whatsapp_atendimentos')
+    .update({ respondendo_ate: null })
+    .eq('id', atendimentoId)
 }
 
 async function respondeuRecentemente(atendimentoId: string, minutos: number): Promise<boolean> {
