@@ -512,7 +512,12 @@ export async function diagnosticar(opcoes: OpcoesDiagnostico): Promise<Diagnosti
       {
         model: comVisao ? MODELO_VISAO : MODELO_RESPOSTA,
         temperature: 0.2,
-        max_tokens: 700,
+        // O modelo de visao raciocina antes de responder, e esse raciocinio
+        // consome do mesmo orcamento. Com 700 tokens ele gastava tudo
+        // pensando e devolvia string vazia, que a Groq rejeita com
+        // json_validate_failed -- um chamado perdido por falta de espaco.
+        // Medido num print real: 1077 tokens ate a resposta completa.
+        max_tokens: comVisao ? 2500 : 700,
         response_format: { type: 'json_object' },
         messages: [
           { role: 'system', content: sistema },
@@ -538,12 +543,18 @@ export async function diagnosticar(opcoes: OpcoesDiagnostico): Promise<Diagnosti
       // o pedido de AnyDesk sem que nenhum passo tivesse sido tentado. Sem a
       // imagem a IA ainda tem o texto e o historico -- pior que analisar a
       // foto, muito melhor que nao tentar nada.
-      const modeloIndisponivel =
-        usarVisao && (erro.includes('does not exist') || erro.includes('(404)'))
+      // json_validate_failed entra aqui pelo mesmo motivo: o modelo de
+      // raciocinio pode estourar o orcamento pensando e devolver vazio.
+      const visaoFalhou =
+        usarVisao &&
+        (erro.includes('does not exist') ||
+          erro.includes('(404)') ||
+          erro.includes('json_validate_failed') ||
+          erro.includes('Failed to validate JSON'))
 
-      if (!modeloIndisponivel) throw e
+      if (!visaoFalhou) throw e
 
-      console.error(`[ia] modelo de visao indisponivel (${MODELO_VISAO}), seguindo so com texto`)
+      console.error(`[ia] visao falhou (${MODELO_VISAO}): ${erro} -- seguindo so com texto`)
 
       conteudo = await executar(
         false,
