@@ -474,36 +474,43 @@ export async function diagnosticar(opcoes: OpcoesDiagnostico): Promise<Diagnosti
   // candidatos: comparar o print recebido com "e assim que este problema
   // aparece" e muito mais confiavel do que decidir pela descricao escrita.
   //
-  // Teto de 3 exemplos: cada imagem custa tokens e diminui a atencao do
-  // modelo no que importa, que e a imagem do cliente.
+  // O teto e do modelo, nao uma escolha de estilo: o qwen aceita 3 imagens
+  // por requisicao e recusa a chamada inteira (400) se passar. Como a foto do
+  // cliente e obrigatoria e sempre a primeira, sobram MAX_IMAGENS - 1 vagas
+  // para exemplos. Menos exemplos tambem ajuda a atencao do modelo a ficar
+  // onde importa, que e a imagem recem-recebida.
+  const MAX_IMAGENS = 3
+
   const exemplos = usarVisao
     ? casos
         .flatMap((c) => c.imagens.slice(0, 1).map((url) => ({ url, titulo: c.titulo })))
-        .slice(0, 3)
+        .slice(0, MAX_IMAGENS - 1)
     : []
 
-  const conteudoUsuario = usarVisao
-    ? [
-        {
-          type: 'text' as const,
-          text:
-            `Problema relatado: ${problema}\n\n` +
-            'A PRIMEIRA imagem foi enviada pelo cliente agora.' +
-            (exemplos.length
-              ? ' As seguintes sao exemplos de como certos casos conhecidos costumam aparecer, ' +
-                'nesta ordem: ' +
-                exemplos.map((e, i) => `(${i + 2}) ${e.titulo}`).join(', ') +
-                '. Compare a imagem do cliente com elas, mas so escolha um caso se ' +
-                'os sintomas tambem baterem.'
-              : ''),
-        },
-        { type: 'image_url' as const, image_url: { url: imagemUrl! } },
-        ...exemplos.map((e) => ({
-          type: 'image_url' as const,
-          image_url: { url: e.url },
-        })),
-      ]
-    : `Problema relatado: ${problema}`
+  const soTexto = `Problema relatado: ${problema}`
+
+  const comImagemDoCliente: ConteudoMensagem = [
+    {
+      type: 'text',
+      text: `${soTexto}\n\nA imagem foi enviada pelo cliente agora. Leia o que estiver escrito nela.`,
+    },
+    { type: 'image_url', image_url: { url: imagemUrl ?? '' } },
+  ]
+
+  const comExemplos: ConteudoMensagem = [
+    {
+      type: 'text',
+      text:
+        `${soTexto}\n\n` +
+        'A PRIMEIRA imagem foi enviada pelo cliente agora. As seguintes sao exemplos de ' +
+        'como certos casos conhecidos costumam aparecer, nesta ordem: ' +
+        exemplos.map((e, i) => `(${i + 2}) ${e.titulo}`).join(', ') +
+        '. Compare a imagem do cliente com elas, mas so escolha um caso se os sintomas ' +
+        'tambem baterem.',
+    },
+    { type: 'image_url', image_url: { url: imagemUrl ?? '' } },
+    ...exemplos.map((e) => ({ type: 'image_url' as const, image_url: { url: e.url } })),
+  ]
 
   const sistema = `${PROMPT_DIAGNOSTICO}\n\n${blocos.join('\n\n')}`
 
@@ -528,40 +535,51 @@ export async function diagnosticar(opcoes: OpcoesDiagnostico): Promise<Diagnosti
       comVisao ? 40_000 : 25_000,
     )
 
-  try {
-    let conteudo: string
+  // Escada de degradacao.
+  //
+  // Cada degrau perde informacao e ganha chance de passar. A alternativa --
+  // uma unica tentativa "bem configurada" -- ja quebrou tres vezes seguidas
+  // em producao, cada uma com um erro diferente e imprevisto: modelo
+  // descontinuado (404), orcamento de tokens curto (json_validate_failed) e
+  // imagens demais (400). O plano gratuito ainda recusa por tamanho de
+  // requisicao e por limite de taxa. Toda vez o custo foi o mesmo: chamado
+  // escalado direto, cliente recebendo pedido de AnyDesk sem nenhum passo
+  // tentado.
+  //
+  // Nao ha lista de erros previstos aqui, de proposito. A pergunta nao e
+  // "este erro estava na lista?", e sim "da para tentar com menos?".
+  const tentativas: { comVisao: boolean; entrada: ConteudoMensagem; rotulo: string }[] = []
 
-    try {
-      conteudo = await executar(usarVisao, conteudoUsuario)
-    } catch (e) {
-      const erro = e instanceof Error ? e.message : String(e)
-
-      // Modelo de visao indisponivel nao pode zerar o atendimento.
-      //
-      // Foi o que aconteceu em producao: o modelo saiu do catalogo da Groq,
-      // toda mensagem com foto passou a escalar na hora, e o cliente recebeu
-      // o pedido de AnyDesk sem que nenhum passo tivesse sido tentado. Sem a
-      // imagem a IA ainda tem o texto e o historico -- pior que analisar a
-      // foto, muito melhor que nao tentar nada.
-      // json_validate_failed entra aqui pelo mesmo motivo: o modelo de
-      // raciocinio pode estourar o orcamento pensando e devolver vazio.
-      const visaoFalhou =
-        usarVisao &&
-        (erro.includes('does not exist') ||
-          erro.includes('(404)') ||
-          erro.includes('json_validate_failed') ||
-          erro.includes('Failed to validate JSON'))
-
-      if (!visaoFalhou) throw e
-
-      console.error(`[ia] visao falhou (${MODELO_VISAO}): ${erro} -- seguindo so com texto`)
-
-      conteudo = await executar(
-        false,
-        `${problema}\n\n(O cliente enviou uma imagem, mas nao foi possivel analisa-la. ` +
-          'Use apenas a descricao e o historico.)',
-      )
+  if (usarVisao) {
+    if (exemplos.length) {
+      tentativas.push({ comVisao: true, entrada: comExemplos, rotulo: 'imagem + exemplos' })
     }
+    tentativas.push({ comVisao: true, entrada: comImagemDoCliente, rotulo: 'imagem do cliente' })
+  }
+
+  tentativas.push({
+    comVisao: false,
+    entrada: usarVisao
+      ? `${soTexto}\n\n(O cliente enviou uma imagem, mas nao foi possivel analisa-la. Use apenas a descricao e o historico.)`
+      : soTexto,
+    rotulo: 'somente texto',
+  })
+
+  try {
+    let conteudo = ''
+
+    for (let i = 0; i < tentativas.length; i++) {
+      const { comVisao, entrada, rotulo } = tentativas[i]
+      try {
+        conteudo = await executar(comVisao, entrada)
+        break
+      } catch (e) {
+        if (i === tentativas.length - 1) throw e
+        const erro = e instanceof Error ? e.message : String(e)
+        console.error(`[ia] tentativa "${rotulo}" falhou: ${erro} -- degradando`)
+      }
+    }
+
 
     const bruto = JSON.parse(conteudo || '{}') as {
       caso_id?: string
