@@ -221,6 +221,37 @@ export default function Conversa({ atendimento, perfil, aoFechar, aoMudar }: Pro
           </div>
         </header>
 
+        {/* Acesso remoto em destaque: e a primeira coisa que o atendente
+            procura ao assumir um chamado que precisa de intervencao. */}
+        {atendimento.acesso_remoto && (
+          <div className="flex items-center gap-3 border-b border-slate-100 bg-emerald-50 px-3 py-2">
+            <span className="text-lg" aria-hidden>
+              🖥️
+            </span>
+            <div className="min-w-0 flex-1">
+              <p className="text-xs text-emerald-800">AnyDesk informado pelo cliente</p>
+              <p className="font-mono text-lg font-semibold tracking-wider text-emerald-900">
+                {atendimento.acesso_remoto}
+              </p>
+            </div>
+            <button
+              onClick={() => {
+                void navigator.clipboard.writeText(atendimento.acesso_remoto!)
+                setErro(null)
+              }}
+              className="rounded-lg border border-emerald-300 bg-white px-3 py-1.5 text-xs font-medium text-emerald-800 hover:bg-emerald-50"
+            >
+              Copiar
+            </button>
+          </div>
+        )}
+
+        {atendimento.acesso_pedido_em && !atendimento.acesso_remoto && (
+          <div className="border-b border-slate-100 bg-slate-50 px-3 py-2 text-xs text-slate-600">
+            🖥️ AnyDesk pedido ao cliente, ainda sem resposta.
+          </div>
+        )}
+
         {(atendimento.motivo_escalonamento || atendimento.motivo_prioridade) && (
           <div className="border-b border-slate-100 bg-amber-50 px-3 py-2 text-xs text-amber-900">
             {atendimento.motivo_escalonamento && (

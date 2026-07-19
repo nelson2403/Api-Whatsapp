@@ -248,6 +248,30 @@ export default function PaginaConfiguracoes() {
           descricao="O alarme sonoro no painel funciona independente disso."
         />
 
+        <Interruptor
+          ligado={config.pedir_acesso_remoto}
+          aoAlternar={(v) => salvarConfig({ pedir_acesso_remoto: v })}
+          titulo="Pedir acesso remoto ao escalar"
+          descricao="Junto com o aviso de que vai chamar um atendente, pede o ID do AnyDesk. Assim o dado ja esta no chamado quando voce assume, em vez de custar mais uma ida e volta."
+        />
+
+        {config.pedir_acesso_remoto && (
+          <label className="block space-y-1">
+            <span className="text-sm font-medium">Mensagem que pede o acesso</span>
+            <textarea
+              value={config.mensagem_acesso_remoto}
+              onChange={(e) => setConfig({ ...config, mensagem_acesso_remoto: e.target.value })}
+              onBlur={(e) => salvarConfig({ mensagem_acesso_remoto: e.target.value })}
+              rows={3}
+              className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-[var(--color-zap)]"
+            />
+            <span className="text-xs text-slate-500">
+              Casos onde acesso remoto nao funciona (sem internet, maquina que nao liga) podem ser
+              marcados individualmente na Base de conhecimento para nao pedir.
+            </span>
+          </label>
+        )}
+
         <label className="block space-y-1">
           <span className="text-sm font-medium">Seu numero (com DDI)</span>
           <input

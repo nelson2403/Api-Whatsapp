@@ -23,6 +23,8 @@ export interface Config {
   redirecionar_privado: boolean
   mensagem_privado: string
   privado_aviso_horas: number
+  pedir_acesso_remoto: boolean
+  mensagem_acesso_remoto: string
 }
 
 export interface Grupo {
@@ -58,6 +60,9 @@ export interface Atendimento {
   caso_sugerido_id: string | null
   motivo_prioridade: string | null
   entrou_na_fila_em: string | null
+  acesso_remoto: string | null
+  acesso_remoto_em: string | null
+  acesso_pedido_em: string | null
   resolvido_por: 'ia' | 'humano' | null
   resolvido_em: string | null
   primeira_resposta_em: string | null
@@ -103,6 +108,8 @@ export interface CasoConhecimento {
   imagens: string[]
   /** Urgencia do chamado quando este caso e reconhecido. */
   urgencia_padrao: 'baixa' | 'normal' | 'alta'
+  /** Falso em problemas onde acesso remoto nao funciona (ex: sem internet). */
+  pedir_acesso_remoto: boolean
 }
 
 export interface Alerta {

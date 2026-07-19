@@ -34,6 +34,7 @@ import { classificar, diagnosticar, preFiltrarCasos, iaDisponivel } from '@/lib/
 import { dispararAlerta } from '@/lib/whatsapp/alertas'
 import { participaDeGrupoAtivo, sincronizarParticipantes } from '@/lib/whatsapp/participantes'
 import { rehospedarMidia, urlParaVisao } from '@/lib/whatsapp/midia'
+import { extrairAcessoRemoto } from '@/lib/whatsapp/acesso-remoto'
 import type {
   Atendimento,
   CasoConhecimento,
@@ -283,6 +284,21 @@ export async function processarMensagem(payload: PayloadZAPI): Promise<Resultado
   // alguns hosts bloqueiam hotlink e devolvem 403 para a Groq.
   const imagemParaVisao = tipo === 'imagem' ? urlParaVisao(midia?.url ?? null, midiaUrl) : null
 
+  // Se ja pedimos o acesso remoto, tenta reconhecer o ID nesta mensagem. Faz
+  // o dado estar esperando no chamado quando o atendente abre, em vez de ele
+  // ter que garimpar na conversa.
+  if (atendimento.acesso_pedido_em && !atendimento.acesso_remoto && tipo === 'texto') {
+    const acesso = extrairAcessoRemoto(texto, numeroContato)
+    if (acesso) {
+      await supabase
+        .from('whatsapp_atendimentos')
+        .update({ acesso_remoto: acesso, acesso_remoto_em: new Date().toISOString() })
+        .eq('id', atendimento.id)
+
+      atendimento.acesso_remoto = acesso
+    }
+  }
+
   const contexto: Contexto = {
     atendimento,
     grupo,
@@ -437,7 +453,13 @@ async function diagnosticarEResponder(
     : `Urgencia estimada pela IA a partir da mensagem`
 
   if (diagnostico.escalar || !diagnostico.texto) {
-    return await escalar(contexto, diagnostico.motivo, prioridade, motivoPrioridade)
+    return await escalar(
+      contexto,
+      diagnostico.motivo,
+      prioridade,
+      motivoPrioridade,
+      casoReconhecido?.pedir_acesso_remoto,
+    )
   }
 
   // Fora do horario: entrega a orientacao mesmo assim, mas deixa claro que
@@ -491,6 +513,8 @@ async function escalar(
   motivo: string,
   urgencia: 'baixa' | 'normal' | 'alta',
   motivoPrioridade?: string,
+  /** Do caso reconhecido. undefined quando nenhum caso foi identificado. */
+  pedeAcessoRemoto?: boolean,
 ): Promise<ResultadoProcessamento> {
   const supabase = criarClienteAdmin()
   const { atendimento, grupo, config, texto } = contexto
@@ -519,7 +543,27 @@ async function escalar(
       ? 'Entendi. Vou chamar um atendente para te ajudar com isso. Aguarde um momento, por favor.'
       : aplicarVariaveisHorario(grupo.mensagem_fora_horario, grupo)
 
-  await responder(contexto, aviso, true)
+  // Pede o acesso remoto junto com o aviso. Pedir so quando o atendente
+  // assume custa mais uma ida e volta, e ate la o cliente pode ter saido de
+  // perto do computador.
+  const pedirAcesso =
+    config.pedir_acesso_remoto &&
+    !atendimento.acesso_remoto &&
+    !atendimento.acesso_pedido_em &&
+    // Caso marcado como incompativel nao pede: mandar instalar AnyDesk em
+    // quem esta sem internet e pedir o impossivel.
+    pedeAcessoRemoto !== false
+
+  const mensagem = pedirAcesso ? `${aviso}\n\n${config.mensagem_acesso_remoto}` : aviso
+
+  await responder(contexto, mensagem, true)
+
+  if (pedirAcesso) {
+    await supabase
+      .from('whatsapp_atendimentos')
+      .update({ acesso_pedido_em: agora.toISOString() })
+      .eq('id', atendimento.id)
+  }
 
   await dispararAlerta({
     atendimento,

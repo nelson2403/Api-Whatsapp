@@ -23,6 +23,7 @@ const VAZIO = {
   ativo: true,
   urgencia_padrao: 'normal' as 'baixa' | 'normal' | 'alta',
   imagens: [] as string[],
+  pedir_acesso_remoto: true,
 }
 
 type Formulario = typeof VAZIO
@@ -65,6 +66,7 @@ export default function PaginaBaseConhecimento() {
       ativo: caso.ativo,
       urgencia_padrao: caso.urgencia_padrao ?? 'normal',
       imagens: caso.imagens ?? [],
+      pedir_acesso_remoto: caso.pedir_acesso_remoto ?? true,
     })
     window.scrollTo({ top: 0, behavior: 'smooth' })
   }
@@ -115,6 +117,7 @@ export default function PaginaBaseConhecimento() {
       ativo: form.ativo,
       urgencia_padrao: form.urgencia_padrao,
       imagens: form.imagens,
+      pedir_acesso_remoto: form.pedir_acesso_remoto,
     }
 
     const { error } = editandoId
@@ -285,6 +288,16 @@ export default function PaginaBaseConhecimento() {
               className="h-4 w-4"
             />
             Sempre encaminhar para atendente
+          </label>
+
+          <label className="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={form.pedir_acesso_remoto}
+              onChange={(e) => setForm({ ...form, pedir_acesso_remoto: e.target.checked })}
+              className="h-4 w-4"
+            />
+            Pedir AnyDesk ao escalar
           </label>
 
           <label className="flex items-center gap-2 text-sm">

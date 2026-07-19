@@ -189,6 +189,17 @@ export default function PainelAtendimentos({ perfil }: { perfil: Perfil }) {
                         </p>
                       </div>
 
+                      {/* Sinaliza na fila quem ja mandou o AnyDesk: da para
+                          escolher atender primeiro quem esta pronto. */}
+                      {a.acesso_remoto && (
+                        <span
+                          title={`AnyDesk ${a.acesso_remoto}`}
+                          className="shrink-0 rounded bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-700"
+                        >
+                          🖥️ pronto
+                        </span>
+                      )}
+
                       <Etiqueta prioridade={a.prioridade} />
 
                       <span
