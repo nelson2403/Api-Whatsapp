@@ -22,7 +22,11 @@ import type { CasoConhecimento } from '@/lib/tipos'
 
 const MODELO_RESPOSTA = process.env.GROQ_MODEL_RESPOSTA || 'llama-3.3-70b-versatile'
 const MODELO_CLASSIFICACAO = process.env.GROQ_MODEL_CLASSIFICACAO || 'llama-3.1-8b-instant'
-const MODELO_VISAO = process.env.GROQ_MODEL_VISAO || 'meta-llama/llama-4-scout-17b-16e-instruct'
+// Modelos de visao entram e saem do catalogo da Groq sem aviso. O anterior
+// (meta-llama/llama-4-scout) foi descontinuado e passou a responder 404, o
+// que derrubava todo diagnostico com imagem. Para conferir o que existe hoje:
+//   curl -H "Authorization: Bearer $GROQ_API_KEY" https://api.groq.com/openai/v1/models
+const MODELO_VISAO = process.env.GROQ_MODEL_VISAO || 'qwen/qwen3.6-27b'
 
 const ENDPOINT = 'https://api.groq.com/openai/v1/chat/completions'
 
@@ -501,21 +505,52 @@ export async function diagnosticar(opcoes: OpcoesDiagnostico): Promise<Diagnosti
       ]
     : `Problema relatado: ${problema}`
 
-  try {
-    const conteudo = await chamarGroq(
+  const sistema = `${PROMPT_DIAGNOSTICO}\n\n${blocos.join('\n\n')}`
+
+  const executar = (comVisao: boolean, entrada: ConteudoMensagem) =>
+    chamarGroq(
       {
-        model: usarVisao ? MODELO_VISAO : MODELO_RESPOSTA,
+        model: comVisao ? MODELO_VISAO : MODELO_RESPOSTA,
         temperature: 0.2,
         max_tokens: 700,
         response_format: { type: 'json_object' },
         messages: [
-          { role: 'system', content: `${PROMPT_DIAGNOSTICO}\n\n${blocos.join('\n\n')}` },
-          { role: 'user', content: conteudoUsuario },
+          { role: 'system', content: sistema },
+          { role: 'user', content: entrada },
         ],
       },
       // Visao demora mais: o modelo ainda baixa cada imagem antes de comecar.
-      usarVisao ? 40_000 : 25_000,
+      comVisao ? 40_000 : 25_000,
     )
+
+  try {
+    let conteudo: string
+
+    try {
+      conteudo = await executar(usarVisao, conteudoUsuario)
+    } catch (e) {
+      const erro = e instanceof Error ? e.message : String(e)
+
+      // Modelo de visao indisponivel nao pode zerar o atendimento.
+      //
+      // Foi o que aconteceu em producao: o modelo saiu do catalogo da Groq,
+      // toda mensagem com foto passou a escalar na hora, e o cliente recebeu
+      // o pedido de AnyDesk sem que nenhum passo tivesse sido tentado. Sem a
+      // imagem a IA ainda tem o texto e o historico -- pior que analisar a
+      // foto, muito melhor que nao tentar nada.
+      const modeloIndisponivel =
+        usarVisao && (erro.includes('does not exist') || erro.includes('(404)'))
+
+      if (!modeloIndisponivel) throw e
+
+      console.error(`[ia] modelo de visao indisponivel (${MODELO_VISAO}), seguindo so com texto`)
+
+      conteudo = await executar(
+        false,
+        `${problema}\n\n(O cliente enviou uma imagem, mas nao foi possivel analisa-la. ` +
+          'Use apenas a descricao e o historico.)',
+      )
+    }
 
     const bruto = JSON.parse(conteudo || '{}') as {
       caso_id?: string
