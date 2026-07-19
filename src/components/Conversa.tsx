@@ -422,6 +422,18 @@ function Bolha({
 
         {midia && ehAudio && <audio src={midia} controls className="mb-1 w-full" />}
 
+        {/* Transcricao do print. Fica recolhida para nao empurrar a conversa
+            para baixo, mas a um clique -- e o texto do erro costuma ser mais
+            util que a propria imagem na hora de entender o chamado. */}
+        {mensagem.leitura_ia && (
+          <details className="mb-1 rounded-lg bg-slate-100 px-2 py-1.5">
+            <summary className="cursor-pointer text-xs font-medium text-slate-600">
+              🔍 O que a IA leu na imagem
+            </summary>
+            <p className="texto-mensagem mt-1 text-xs text-slate-700">{mensagem.leitura_ia}</p>
+          </details>
+        )}
+
         {midia && !ehImagem && !ehVideo && !ehAudio && (
           <a
             href={midia}

@@ -221,7 +221,123 @@ export async function classificar(opcoes: OpcoesClassificacao): Promise<Classifi
 }
 
 // ---------------------------------------------------------------------------
-// 2. Pre-filtro da base de conhecimento
+// 2. Leitura da imagem
+// ---------------------------------------------------------------------------
+
+export interface LeituraImagem {
+  /** Transcricao literal de tudo que da para ler na tela. */
+  textoLido: string
+  /** O que a imagem mostra, em uma frase. */
+  descricao: string
+  /** Codigos de erro, IPs, portas, caminhos -- o que identifica o problema. */
+  detalhes: string[]
+  erro: string | null
+}
+
+const PROMPT_LEITURA = `Voce le prints de tela de sistemas de PDV, retaguarda e equipamentos de loja.
+
+Sua tarefa e EXTRAIR, nao interpretar. Responda APENAS com JSON:
+{"texto_lido": "...", "descricao": "...", "detalhes": ["...", "..."]}
+
+"texto_lido": transcreva LITERALMENTE todo texto legivel na imagem, inclusive
+titulos de janela, mensagens de erro, botoes e rodape. Mantenha a grafia
+original, mesmo com erro. Se houver texto cortado ou ilegivel, escreva o que
+der e marque com [ilegivel]. Nao resuma, nao corrija, nao traduza.
+
+"descricao": uma frase dizendo o que a tela mostra (ex: "janela de erro do
+sistema de PDV sobre conexao com banco de dados").
+
+"detalhes": lista com os dados tecnicos que aparecem, um por item. Inclua
+tudo que existir: codigo de erro, numero de erro, IP, nome de servidor,
+porta, caminho de arquivo, nome do sistema, versao, data e hora. Se nao
+houver nenhum, devolva lista vazia.
+
+Extraia o maximo possivel. Um numero de porta ou um codigo de erro costuma
+ser o que identifica o problema -- perder isso custa o atendimento inteiro.`
+
+/**
+ * Passo separado antes do diagnostico.
+ *
+ * Sem ele, o pre-filtro da base recebia so "[imagem enviada]" e escolhia os
+ * casos candidatos praticamente no escuro -- a informacao que identificava o
+ * problema estava dentro da foto, invisivel para o filtro. Lendo primeiro, o
+ * texto extraido alimenta a busca e o diagnostico.
+ *
+ * A transcricao tambem fica gravada e aparece no painel: o atendente le o
+ * erro sem precisar abrir e ampliar a imagem.
+ */
+export async function lerImagem(
+  imagemUrl: string,
+  contextoDoCliente?: string,
+): Promise<LeituraImagem> {
+  const vazio: LeituraImagem = { textoLido: '', descricao: '', detalhes: [], erro: null }
+
+  if (!iaDisponivel()) return { ...vazio, erro: 'IA nao configurada' }
+  if (!imagemUrl) return { ...vazio, erro: 'Sem imagem' }
+
+  try {
+    const conteudo = await chamarGroq(
+      {
+        model: MODELO_VISAO,
+        temperature: 0,
+        max_tokens: 2500,
+        response_format: { type: 'json_object' },
+        messages: [
+          { role: 'system', content: PROMPT_LEITURA },
+          {
+            role: 'user',
+            content: [
+              {
+                type: 'text',
+                text: contextoDoCliente
+                  ? `O cliente disse: "${contextoDoCliente}". Extraia tudo desta imagem.`
+                  : 'Extraia tudo desta imagem.',
+              },
+              { type: 'image_url', image_url: { url: imagemUrl } },
+            ],
+          },
+        ],
+      },
+      40_000,
+    )
+
+    const bruto = JSON.parse(conteudo || '{}') as {
+      texto_lido?: string
+      descricao?: string
+      detalhes?: unknown
+    }
+
+    return {
+      textoLido: typeof bruto.texto_lido === 'string' ? bruto.texto_lido.slice(0, 2000) : '',
+      descricao: typeof bruto.descricao === 'string' ? bruto.descricao.slice(0, 300) : '',
+      detalhes: Array.isArray(bruto.detalhes)
+        ? bruto.detalhes.filter((d): d is string => typeof d === 'string').slice(0, 15)
+        : [],
+      erro: null,
+    }
+  } catch (e) {
+    const erro = e instanceof Error ? e.message : String(e)
+    console.error('[ia] leitura da imagem falhou:', erro)
+    return { ...vazio, erro }
+  }
+}
+
+/** Junta a leitura da imagem ao relato do cliente, para busca e diagnostico. */
+export function combinarRelatoComLeitura(relato: string, leitura: LeituraImagem): string {
+  if (!leitura.textoLido && !leitura.descricao) return relato
+
+  return [
+    relato,
+    leitura.descricao ? `\n[Imagem: ${leitura.descricao}]` : '',
+    leitura.textoLido ? `\n[Texto na tela: ${leitura.textoLido}]` : '',
+    leitura.detalhes.length ? `\n[Dados: ${leitura.detalhes.join(' | ')}]` : '',
+  ]
+    .filter(Boolean)
+    .join('')
+}
+
+// ---------------------------------------------------------------------------
+// 3. Pre-filtro da base de conhecimento
 // ---------------------------------------------------------------------------
 
 /**

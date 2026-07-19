@@ -87,6 +87,8 @@ export interface Mensagem {
   midia_tipo: string | null
   midia_nome: string | null
   midia_original: string | null
+  /** Transcricao do que a IA leu na imagem. */
+  leitura_ia: string | null
   raw: Record<string, unknown> | null
   created_at: string
 }

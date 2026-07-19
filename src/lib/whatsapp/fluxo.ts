@@ -30,7 +30,15 @@ import { criarClienteAdmin } from '@/lib/supabase/admin'
 import { enviarTexto } from '@/lib/whatsapp/zapi'
 import { normalizarTelefone, telefonesBatem, paraEnvio } from '@/lib/whatsapp/telefone'
 import { dentroDoHorario, aplicarVariaveisHorario } from '@/lib/whatsapp/horario'
-import { classificar, diagnosticar, preFiltrarCasos, iaDisponivel } from '@/lib/whatsapp/ia'
+import {
+  classificar,
+  diagnosticar,
+  preFiltrarCasos,
+  iaDisponivel,
+  lerImagem,
+  combinarRelatoComLeitura,
+  type LeituraImagem,
+} from '@/lib/whatsapp/ia'
 import { dispararAlerta } from '@/lib/whatsapp/alertas'
 import { participaDeGrupoAtivo, sincronizarParticipantes } from '@/lib/whatsapp/participantes'
 import { rehospedarMidia, urlParaVisao } from '@/lib/whatsapp/midia'
@@ -392,6 +400,30 @@ interface Contexto {
 // Passo 15/16 -- diagnostico
 // ---------------------------------------------------------------------------
 
+/**
+ * Grava a transcricao junto da mensagem que trouxe a imagem, para o atendente
+ * ler sem precisar abrir e ampliar o print.
+ */
+async function guardarLeitura(
+  atendimentoId: string,
+  imagemUrl: string,
+  leitura: LeituraImagem,
+): Promise<void> {
+  const supabase = criarClienteAdmin()
+
+  const partes = [
+    leitura.descricao,
+    leitura.textoLido ? `\n${leitura.textoLido}` : '',
+    leitura.detalhes.length ? `\n\n${leitura.detalhes.join('\n')}` : '',
+  ].filter(Boolean)
+
+  await supabase
+    .from('whatsapp_mensagens')
+    .update({ leitura_ia: partes.join('').slice(0, 4000) })
+    .eq('atendimento_id', atendimentoId)
+    .eq('midia_url', imagemUrl)
+}
+
 /** Quanto tempo duas mensagens ainda contam como o mesmo relato. */
 const JANELA_PAREAMENTO_MS = 5 * 60_000
 
@@ -488,7 +520,24 @@ async function diagnosticarEResponder(
   // caixa nao abre". Tratadas isoladamente, a foto e diagnosticada sem
   // contexto nenhum e o texto sem a imagem que o explica -- as duas metades
   // do problema, nenhuma suficiente.
-  const { texto: problema, imagemUrl } = await juntarFotoEExplicacao(contexto)
+  const { texto: relato, imagemUrl } = await juntarFotoEExplicacao(contexto)
+
+  // Le a imagem ANTES de escolher os casos candidatos.
+  //
+  // O pre-filtro trabalha por sobreposicao de termos. Com "[imagem enviada]"
+  // como entrada ele nao tem termo nenhum para casar, e os candidatos saiam
+  // praticamente no escuro -- justamente quando o que identifica o problema
+  // (codigo de erro, IP, porta) esta escrito dentro da foto.
+  let problema = relato
+
+  if (imagemUrl) {
+    const leitura = await lerImagem(imagemUrl, relato)
+
+    if (!leitura.erro && (leitura.textoLido || leitura.descricao)) {
+      problema = combinarRelatoComLeitura(relato, leitura)
+      await guardarLeitura(atendimento.id, imagemUrl, leitura)
+    }
+  }
 
   const candidatos = preFiltrarCasos(problema, casos)
 
