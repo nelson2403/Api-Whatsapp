@@ -8,6 +8,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { criarClienteNavegador } from '@/lib/supabase/client'
+import UploadImagens from '@/components/UploadImagens'
 import type { CasoConhecimento } from '@/lib/tipos'
 
 const VAZIO = {
@@ -20,6 +21,8 @@ const VAZIO = {
   escalar_direto: false,
   prioridade: 0,
   ativo: true,
+  urgencia_padrao: 'normal' as 'baixa' | 'normal' | 'alta',
+  imagens: [] as string[],
 }
 
 type Formulario = typeof VAZIO
@@ -60,6 +63,8 @@ export default function PaginaBaseConhecimento() {
       escalar_direto: caso.escalar_direto,
       prioridade: caso.prioridade,
       ativo: caso.ativo,
+      urgencia_padrao: caso.urgencia_padrao ?? 'normal',
+      imagens: caso.imagens ?? [],
     })
     window.scrollTo({ top: 0, behavior: 'smooth' })
   }
@@ -108,6 +113,8 @@ export default function PaginaBaseConhecimento() {
       escalar_direto: form.escalar_direto,
       prioridade: Number(form.prioridade) || 0,
       ativo: form.ativo,
+      urgencia_padrao: form.urgencia_padrao,
+      imagens: form.imagens,
     }
 
     const { error } = editandoId
@@ -242,6 +249,31 @@ export default function PaginaBaseConhecimento() {
             rows={2}
             className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-[var(--color-zap)]"
           />
+        </label>
+
+        <UploadImagens
+          imagens={form.imagens}
+          aoMudar={(imagens) => setForm({ ...form, imagens })}
+        />
+
+        <label className="block space-y-1">
+          <span className="text-sm font-medium">Urgencia deste problema</span>
+          <select
+            value={form.urgencia_padrao}
+            onChange={(e) =>
+              setForm({ ...form, urgencia_padrao: e.target.value as 'baixa' | 'normal' | 'alta' })
+            }
+            className="w-full max-w-xs rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-[var(--color-zap)]"
+          >
+            <option value="baixa">Baixa - pode esperar</option>
+            <option value="normal">Normal - atender no fluxo</option>
+            <option value="alta">Urgente - operacao parada</option>
+          </select>
+          <span className="block text-xs text-slate-500">
+            Quando a IA reconhecer este caso, o chamado entra na fila com esta prioridade. Quem
+            sabe o que para a operacao e voce, nao a IA -- por isso a urgencia vem daqui e nao de
+            um palpite sobre o texto da mensagem.
+          </span>
         </label>
 
         <div className="flex flex-wrap items-center gap-5">

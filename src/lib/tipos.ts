@@ -9,7 +9,7 @@ export type StatusAtendimento =
 
 export type OrigemAtendimento = 'grupo' | 'privado'
 export type DirecaoMensagem = 'recebida' | 'enviada'
-export type TipoMensagem = 'texto' | 'imagem' | 'audio' | 'documento' | 'outro'
+export type TipoMensagem = 'texto' | 'imagem' | 'video' | 'audio' | 'documento' | 'outro'
 export type Papel = 'admin' | 'atendente'
 
 export interface Config {
@@ -56,6 +56,8 @@ export interface Atendimento {
   escalado_em: string | null
   motivo_escalonamento: string | null
   caso_sugerido_id: string | null
+  motivo_prioridade: string | null
+  entrou_na_fila_em: string | null
   resolvido_por: 'ia' | 'humano' | null
   resolvido_em: string | null
   primeira_resposta_em: string | null
@@ -75,6 +77,11 @@ export interface Mensagem {
   zapi_message_id: string | null
   gerado_por_ia: boolean
   enviado_por: string | null
+  /** Copia rehospedada no Storage. A original do Z-API expira. */
+  midia_url: string | null
+  midia_tipo: string | null
+  midia_nome: string | null
+  midia_original: string | null
   raw: Record<string, unknown> | null
   created_at: string
 }
@@ -92,6 +99,10 @@ export interface CasoConhecimento {
   ativo: boolean
   vezes_usado: number
   vezes_resolveu: number
+  /** Imagens de exemplo: ajudam o atendente e o modelo de visao. */
+  imagens: string[]
+  /** Urgencia do chamado quando este caso e reconhecido. */
+  urgencia_padrao: 'baixa' | 'normal' | 'alta'
 }
 
 export interface Alerta {
@@ -132,6 +143,7 @@ export interface PayloadZAPI {
   text?: { message?: string }
   message?: string
   image?: { imageUrl?: string; caption?: string; mimeType?: string }
+  video?: { videoUrl?: string; caption?: string; mimeType?: string }
   audio?: { audioUrl?: string; mimeType?: string }
   document?: { documentUrl?: string; fileName?: string; mimeType?: string }
   [k: string]: unknown

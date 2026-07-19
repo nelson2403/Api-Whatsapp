@@ -352,6 +352,7 @@ export async function diagnosticar(opcoes: OpcoesDiagnostico): Promise<Diagnosti
               ? `Passos:\n${c.passos.map((p, i) => `  ${i + 1}. ${p}`).join('\n')}`
               : null,
             c.observacao ? `Observacao final: ${c.observacao}` : null,
+            c.imagens.length ? `Tem ${c.imagens.length} imagem(ns) de exemplo cadastrada(s).` : null,
             c.escalar_direto
               ? 'ATENCAO: este caso NAO pode ser resolvido pelo bot. Se ele corresponder, escale.'
               : null,
@@ -387,10 +388,38 @@ export async function diagnosticar(opcoes: OpcoesDiagnostico): Promise<Diagnosti
   // --- Chamada -------------------------------------------------------------
   const usarVisao = Boolean(imagemUrl)
 
+  // Com imagem do cliente, anexa tambem as imagens de exemplo dos casos
+  // candidatos: comparar o print recebido com "e assim que este problema
+  // aparece" e muito mais confiavel do que decidir pela descricao escrita.
+  //
+  // Teto de 3 exemplos: cada imagem custa tokens e diminui a atencao do
+  // modelo no que importa, que e a imagem do cliente.
+  const exemplos = usarVisao
+    ? casos
+        .flatMap((c) => c.imagens.slice(0, 1).map((url) => ({ url, titulo: c.titulo })))
+        .slice(0, 3)
+    : []
+
   const conteudoUsuario = usarVisao
     ? [
-        { type: 'text' as const, text: `Problema relatado: ${problema}` },
+        {
+          type: 'text' as const,
+          text:
+            `Problema relatado: ${problema}\n\n` +
+            'A PRIMEIRA imagem foi enviada pelo cliente agora.' +
+            (exemplos.length
+              ? ' As seguintes sao exemplos de como certos casos conhecidos costumam aparecer, ' +
+                'nesta ordem: ' +
+                exemplos.map((e, i) => `(${i + 2}) ${e.titulo}`).join(', ') +
+                '. Compare a imagem do cliente com elas, mas so escolha um caso se ' +
+                'os sintomas tambem baterem.'
+              : ''),
+        },
         { type: 'image_url' as const, image_url: { url: imagemUrl! } },
+        ...exemplos.map((e) => ({
+          type: 'image_url' as const,
+          image_url: { url: e.url },
+        })),
       ]
     : `Problema relatado: ${problema}`
 

@@ -33,6 +33,7 @@ import { dentroDoHorario, aplicarVariaveisHorario } from '@/lib/whatsapp/horario
 import { classificar, diagnosticar, preFiltrarCasos, iaDisponivel } from '@/lib/whatsapp/ia'
 import { dispararAlerta } from '@/lib/whatsapp/alertas'
 import { participaDeGrupoAtivo, sincronizarParticipantes } from '@/lib/whatsapp/participantes'
+import { rehospedarMidia, urlParaVisao } from '@/lib/whatsapp/midia'
 import type {
   Atendimento,
   CasoConhecimento,
@@ -55,31 +56,58 @@ export interface ResultadoProcessamento {
 interface MensagemExtraida {
   texto: string
   tipo: TipoMensagem
-  imagemUrl: string | null
+  /** URL do arquivo no storage temporario do Z-API. */
+  midiaUrl: string | null
+  midiaMime: string | null
+  midiaNome: string | null
 }
 
 function extrairConteudo(payload: PayloadZAPI): MensagemExtraida {
+  const vazio = { midiaUrl: null, midiaMime: null, midiaNome: null }
+
   if (payload.image?.imageUrl) {
     return {
       texto: payload.image.caption?.trim() || '[imagem enviada]',
       tipo: 'imagem',
-      imagemUrl: payload.image.imageUrl,
+      midiaUrl: payload.image.imageUrl,
+      midiaMime: payload.image.mimeType ?? null,
+      midiaNome: null,
     }
   }
+
+  if (payload.video?.videoUrl) {
+    return {
+      texto: payload.video.caption?.trim() || '[video enviado]',
+      tipo: 'video',
+      midiaUrl: payload.video.videoUrl,
+      midiaMime: payload.video.mimeType ?? null,
+      midiaNome: null,
+    }
+  }
+
   if (payload.audio?.audioUrl) {
     // Sem transcricao ainda -- audio sempre vai para humano.
-    return { texto: '[audio enviado]', tipo: 'audio', imagemUrl: null }
+    return {
+      texto: '[audio enviado]',
+      tipo: 'audio',
+      midiaUrl: payload.audio.audioUrl,
+      midiaMime: payload.audio.mimeType ?? null,
+      midiaNome: null,
+    }
   }
+
   if (payload.document?.documentUrl) {
     return {
       texto: `[documento: ${payload.document.fileName ?? 'arquivo'}]`,
       tipo: 'documento',
-      imagemUrl: null,
+      midiaUrl: payload.document.documentUrl,
+      midiaMime: payload.document.mimeType ?? null,
+      midiaNome: payload.document.fileName ?? null,
     }
   }
 
   const texto = (payload.text?.message ?? payload.message ?? '').toString().trim()
-  return { texto, tipo: texto ? 'texto' : 'outro', imagemUrl: null }
+  return { texto, tipo: texto ? 'texto' : 'outro', ...vazio }
 }
 
 // ---------------------------------------------------------------------------
@@ -109,7 +137,7 @@ export async function processarMensagem(payload: PayloadZAPI): Promise<Resultado
 
   const nomeContato = payload.senderName?.trim() || null
   const messageId = payload.messageId ?? null
-  const { texto, tipo, imagemUrl } = extrairConteudo(payload)
+  const { texto, tipo, midiaUrl, midiaMime, midiaNome } = extrairConteudo(payload)
 
   // --- 02. Idempotencia ----------------------------------------------------
   if (messageId) {
@@ -149,6 +177,20 @@ export async function processarMensagem(payload: PayloadZAPI): Promise<Resultado
   }
 
   // --- 05. Grava a mensagem -----------------------------------------------
+  //
+  // A midia e rehospedada ANTES de gravar: a URL do Z-API expira, e um
+  // chamado consultado dias depois mostraria imagem quebrada exatamente
+  // quando o historico e mais util.
+  const midia = midiaUrl
+    ? await rehospedarMidia(midiaUrl, {
+        mimeType: midiaMime,
+        nome: midiaNome,
+        prefixo: grupo ? `grupos/${grupo.id}` : 'privado',
+      })
+    : null
+
+  if (midia?.erro) console.error('[fluxo] falha ao rehospedar midia:', midia.erro)
+
   const { data: mensagemSalva, error: erroMensagem } = await supabase
     .from('whatsapp_mensagens')
     .insert({
@@ -160,6 +202,12 @@ export async function processarMensagem(payload: PayloadZAPI): Promise<Resultado
       remetente_numero: numeroContato,
       remetente_nome: nomeContato,
       zapi_message_id: messageId,
+      // Se a rehospedagem falhar, ainda guarda a original: melhor um link que
+      // talvez expire do que nenhum.
+      midia_url: midia?.url ?? midiaUrl,
+      midia_tipo: midia?.mimeType ?? midiaMime,
+      midia_nome: midiaNome,
+      midia_original: midiaUrl,
       raw: payload as unknown as Record<string, unknown>,
     })
     .select('id')
@@ -231,7 +279,21 @@ export async function processarMensagem(payload: PayloadZAPI): Promise<Resultado
     })
     .eq('id', atendimento.id)
 
-  const contexto = { atendimento, grupo, config, chatId, payload, texto, imagemUrl, nomeContato }
+  // Visao usa a copia rehospedada: a original do Z-API pode ja ter expirado, e
+  // alguns hosts bloqueiam hotlink e devolvem 403 para a Groq.
+  const imagemParaVisao = tipo === 'imagem' ? urlParaVisao(midia?.url ?? null, midiaUrl) : null
+
+  const contexto: Contexto = {
+    atendimento,
+    grupo,
+    config,
+    chatId,
+    payload,
+    texto,
+    imagemUrl: imagemParaVisao,
+    nomeContato,
+    tipo,
+  }
 
   // --- 10. Humano assumiu --------------------------------------------------
   if (atendimento.usuario_id) {
@@ -307,6 +369,7 @@ interface Contexto {
   texto: string
   imagemUrl: string | null
   nomeContato: string | null
+  tipo: TipoMensagem
 }
 
 // ---------------------------------------------------------------------------
@@ -360,8 +423,21 @@ async function diagnosticarEResponder(
     nomeContato,
   })
 
+  // Prioridade sai do caso reconhecido, nao de um palpite sobre o texto.
+  // Quem sabe que "bomba parada" para a operacao e quem escreveu o caso --
+  // o modelo so leu a frase. Quando a IA nao reconhece caso nenhum, ai sim
+  // vale a leitura dela sobre a urgencia.
+  const casoReconhecido = diagnostico.casoId
+    ? candidatos.find((c) => c.id === diagnostico.casoId)
+    : null
+
+  const prioridade = casoReconhecido?.urgencia_padrao ?? urgencia
+  const motivoPrioridade = casoReconhecido
+    ? `Caso "${casoReconhecido.titulo}" e ${casoReconhecido.urgencia_padrao}`
+    : `Urgencia estimada pela IA a partir da mensagem`
+
   if (diagnostico.escalar || !diagnostico.texto) {
-    return await escalar(contexto, diagnostico.motivo, urgencia)
+    return await escalar(contexto, diagnostico.motivo, prioridade, motivoPrioridade)
   }
 
   // Fora do horario: entrega a orientacao mesmo assim, mas deixa claro que
@@ -385,7 +461,8 @@ async function diagnosticarEResponder(
       ia_tentativas: atendimento.ia_tentativas + 1,
       caso_sugerido_id: diagnostico.casoId,
       status: 'aguardando_cliente',
-      prioridade: urgencia === 'alta' ? 'alta' : atendimento.prioridade,
+      prioridade,
+      motivo_prioridade: motivoPrioridade,
       ...(atendimento.primeira_resposta_em ? {} : { primeira_resposta_em: agora }),
     })
     .eq('id', atendimento.id)
@@ -413,6 +490,7 @@ async function escalar(
   contexto: Contexto,
   motivo: string,
   urgencia: 'baixa' | 'normal' | 'alta',
+  motivoPrioridade?: string,
 ): Promise<ResultadoProcessamento> {
   const supabase = criarClienteAdmin()
   const { atendimento, grupo, config, texto } = contexto
@@ -427,7 +505,11 @@ async function escalar(
       escalado_em: agora.toISOString(),
       motivo_escalonamento: motivo,
       status: 'em_andamento',
-      prioridade: urgencia === 'alta' ? 'alta' : atendimento.prioridade,
+      prioridade: urgencia,
+      motivo_prioridade: motivoPrioridade ?? 'Urgencia estimada pela IA',
+      // Marca a entrada na fila. Sem isso a espera seria contada desde a
+      // criacao do chamado, inflando o tempo de quem a IA tentou ajudar antes.
+      ...(atendimento.entrou_na_fila_em ? {} : { entrou_na_fila_em: agora.toISOString() }),
     })
     .eq('id', atendimento.id)
 

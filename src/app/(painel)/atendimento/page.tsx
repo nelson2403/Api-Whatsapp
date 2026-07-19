@@ -1,6 +1,6 @@
 import { redirect } from 'next/navigation'
 import { usuarioAtual } from '@/lib/supabase/server'
-import Inbox from '@/components/Inbox'
+import PainelAtendimentos from '@/components/PainelAtendimentos'
 import type { Perfil } from '@/lib/tipos'
 
 export const dynamic = 'force-dynamic'
@@ -21,5 +21,5 @@ export default async function PaginaAtendimento() {
     ativo: true,
   }
 
-  return <Inbox perfil={perfil} />
+  return <PainelAtendimentos perfil={perfil} />
 }
